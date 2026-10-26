@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 25
     steps:
       - name: Checkout
@@ -47,7 +47,15 @@ jobs:
           xcodegen --version
 
       - name: 生成 Xcode 工程
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          # 新版 xcodegen 会写 objectVersion = 77（Xcode 16 格式），
+          # 旧版 Xcode 读不了，这里统一下降到 55（Xcode 13+ 都能读）
+          /usr/bin/sed -i '' -E 's/objectVersion = [0-9]+;/objectVersion = 55;/g' 123AV.xcodeproj/project.pbxproj
+          echo "--- pbxproj 头部 ---"
+          head -5 123AV.xcodeproj/project.pbxproj
+          echo "--- xcode 版本 ---"
+          xcodebuild -version
 
       - name: 编译 App（未签名）
         env:
