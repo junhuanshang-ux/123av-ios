@@ -334,11 +334,6 @@ final class NativePlayerViewController: UIViewController {
         return true
     }
 
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return false
-    }
-
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
         setControlsVisible(!controlsVisible)
     }
