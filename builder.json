@@ -1,0 +1,32 @@
+{
+  "project_name": "123AV",
+  "repository": "https://github.com/junhuanshang-ux/123av-ios",
+  "repo": {
+    "owner": "junhuanshang-ux",
+    "name": "123av-ios",
+    "branch": "main"
+  },
+  "github": {
+    "authenticated": true
+  },
+  "build": {
+    "workflow_id": "ios-xcode.yml",
+    "branch": "main",
+    "scheme": "123AV",
+    "configuration": "Release",
+    "build_mode": "release",
+    "project_type": "xcode"
+  },
+  "ios": {
+    "minimum_version": "14.0",
+    "target_version": "17.0",
+    "devices": [
+      "iPhone",
+      "iPad"
+    ]
+  },
+  "ai": {
+    "enabled": false,
+    "auto_fix": false
+  }
+}
