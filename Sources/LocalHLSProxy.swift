@@ -33,19 +33,26 @@ final class LocalHLSProxy {
     func startIfNeeded() -> UInt16 {
         if started { return port }
         started = true
+        port = start(loopbackOnly: true) ?? start(loopbackOnly: false) ?? 0
+        return port
+    }
 
+    private func start(loopbackOnly: Bool) -> UInt16? {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
-            params.requiredInterfaceType = .loopback
+            if loopbackOnly {
+                params.requiredInterfaceType = .loopback
+            }
 
             let listener = try NWListener(using: params, on: .any)
             let semaphore = DispatchSemaphore(value: 0)
+            var assigned: UInt16 = 0
 
-            listener.stateUpdateHandler = { [weak self] state in
+            listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    if let p = listener.port { self?.port = p.rawValue }
+                    if let p = listener.port { assigned = p.rawValue }
                     semaphore.signal()
                 case .failed, .cancelled:
                     semaphore.signal()
@@ -57,12 +64,18 @@ final class LocalHLSProxy {
                 self?.accept(connection)
             }
             listener.start(queue: queue)
-            self.listener = listener
-            _ = semaphore.wait(timeout: .now() + 3)
+            _ = semaphore.wait(timeout: .now() + 2)
+
+            if assigned > 0 {
+                self.listener = listener
+                self.port = assigned
+                return assigned
+            }
+            listener.cancel()
+            return nil
         } catch {
-            self.port = 0
+            return nil
         }
-        return port
     }
 
     func stop() {
@@ -95,7 +108,10 @@ final class LocalHLSProxy {
         guard port > 0 else { return nil }
         let u = LocalHLSProxy.encode(remote.absoluteString)
         let r = LocalHLSProxy.encode(referer)
-        return URL(string: "http://127.0.0.1:\(port)/p?r=\(r)&u=\(u)")
+        let rawName = remote.lastPathComponent
+        let name = (rawName.isEmpty ? "seg" : rawName)
+            .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "seg"
+        return URL(string: "http://127.0.0.1:\(port)/p/\(name)?r=\(r)&u=\(u)")
     }
 
     // MARK: - 连接处理
