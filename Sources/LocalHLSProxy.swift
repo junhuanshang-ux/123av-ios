@@ -17,6 +17,13 @@ final class LocalHLSProxy {
     private(set) var port: UInt16 = 0
     private var started = false
 
+    // 缓存：播放列表与最近的分片（改善起播与拖动）
+    private let cacheLock = NSLock()
+    private var cache: [String: Data] = [:]
+    private var cacheOrder: [String] = []
+    private var cacheBytes = 0
+    private let cacheLimit = 8 * 1024 * 1024
+
     private init() {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 20
@@ -172,33 +179,68 @@ final class LocalHLSProxy {
             return
         }
 
+        if let hit = cached(target.absoluteString) {
+            deliver(hit, target: target, mime: nil, referer: referer, connection: connection)
+            return
+        }
+
         fetch(target, referer: referer) { [weak self] data, mime, error in
             guard let self = self else { return }
             guard let data = data, error == nil else {
                 self.respond(connection, status: 502, body: Data())
                 return
             }
+            self.store(target.absoluteString, data)
+            self.deliver(data, target: target, mime: mime, referer: referer, connection: connection)
+        }
+    }
 
-            let isPlaylist = target.path.lowercased().hasSuffix(".m3u8")
-                || data.starts(with: Data("#EXTM3U".utf8))
+    /// 把上游字节回给 AVPlayer（播放列表先改写）
+    private func deliver(_ data: Data,
+                         target: URL,
+                         mime: String?,
+                         referer: String,
+                         connection: NWConnection) {
+        let isPlaylist = target.path.lowercased().hasSuffix(".m3u8")
+            || data.starts(with: Data("#EXTM3U".utf8))
 
-            if isPlaylist {
-                let text = String(decoding: data, as: UTF8.self)
-                let rewritten = self.rewritePlaylist(text, base: target, referer: referer)
-                self.respond(connection,
-                             status: 200,
-                             contentType: "application/vnd.apple.mpegurl",
-                             body: Data(rewritten.utf8))
-            } else {
-                self.respond(connection,
-                             status: 200,
-                             contentType: self.mimeType(for: target, from: mime, body: data),
-                             body: data)
-            }
+        if isPlaylist {
+            let text = String(decoding: data, as: UTF8.self)
+            let rewritten = rewritePlaylist(text, base: target, referer: referer)
+            respond(connection,
+                    status: 200,
+                    contentType: "application/vnd.apple.mpegurl",
+                    body: Data(rewritten.utf8))
+        } else {
+            respond(connection,
+                    status: 200,
+                    contentType: mimeType(for: target, from: mime, body: data),
+                    body: data)
         }
     }
 
     // MARK: - 上游请求
+
+    private func cached(_ key: String) -> Data? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cache[key]
+    }
+
+    private func store(_ key: String, _ data: Data) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard cache[key] == nil else { return }
+        cache[key] = data
+        cacheOrder.append(key)
+        cacheBytes += data.count
+        while cacheBytes > cacheLimit, let oldest = cacheOrder.first {
+            cacheOrder.removeFirst()
+            if let removed = cache.removeValue(forKey: oldest) {
+                cacheBytes -= removed.count
+            }
+        }
+    }
 
     private func fetch(_ url: URL, referer: String, completion: @escaping (Data?, String?, Error?) -> Void) {
         var request = URLRequest(url: url)

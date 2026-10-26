@@ -29,7 +29,9 @@ final class NativePlayerViewController: UIViewController {
     private var player: AVPlayer?
     private var playerLayer: AVPlayerLayer?
     private var streamURL: URL?
-    private var lastFailure: String?
+    private var usingLocalProxy = false
+    private var directWatchdog: DispatchWorkItem?
+    private let directFlagKey = "player.directWorks"
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var pip: AVPictureInPictureController?
@@ -44,7 +46,6 @@ final class NativePlayerViewController: UIViewController {
     // MARK: - UI
 
     private let videoView = UIView()
-    private let gestureView = UIView()
     private let controls = UIView()
     private let topBar = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
     private let bottomBar = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
@@ -126,15 +127,11 @@ final class NativePlayerViewController: UIViewController {
         videoView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(videoView)
 
-        gestureView.backgroundColor = .clear
-        gestureView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(gestureView)
-
         controls.backgroundColor = .clear
         controls.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(controls)
 
-        for anchor in [videoView, gestureView, controls] {
+        for anchor in [videoView, controls] {
             NSLayoutConstraint.activate([
                 anchor.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 anchor.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -309,16 +306,37 @@ final class NativePlayerViewController: UIViewController {
         singleTap.require(toFail: doubleTap)
 
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-        longPress.minimumPressDuration = 0.32
-        longPress.allowableMovement = 14
+        longPress.minimumPressDuration = 0.30
+        longPress.allowableMovement = 16
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.delegate = self
         pan.maximumNumberOfTouches = 1
 
-        for g in [singleTap, doubleTap, pan, longPress] as [UIGestureRecognizer] {
-            gestureView.addGestureRecognizer(g)
+        // 挂在根视图：controls 里的按钮/进度条通过 delegate 排除，其余整屏都能手势
+        for gesture in [singleTap, doubleTap, pan, longPress] as [UIGestureRecognizer] {
+            gesture.delegate = self
+            gesture.cancelsTouchesInView = false
+            view.addGestureRecognizer(gesture)
         }
+    }
+
+    /// 触摸落在控制条（顶栏 / 底栏）里就交给按钮，不参与手势
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldReceive touch: UITouch) -> Bool {
+        guard let touched = touch.view else { return true }
+        if touched.isDescendant(of: topBar) || touched.isDescendant(of: bottomBar) {
+            return false
+        }
+        if touched is UIControl && !(touched is UILabel) {
+            return false
+        }
+        return true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        return false
     }
 
     @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
@@ -326,8 +344,8 @@ final class NativePlayerViewController: UIViewController {
     }
 
     @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
-        let x = gesture.location(in: gestureView).x
-        let width = max(gestureView.bounds.width, 1)
+        let x = gesture.location(in: view).x
+        let width = max(view.bounds.width, 1)
         if x < width * 0.35 {
             seek(by: -10)
         } else if x > width * 0.65 {
@@ -337,28 +355,35 @@ final class NativePlayerViewController: UIViewController {
         }
     }
 
+    /// 按住右半屏 → 2 倍速，松手恢复
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
         switch gesture.state {
         case .began:
-            guard gesture.location(in: gestureView).x > gestureView.bounds.width * 0.5 else { return }
+            let x = gesture.location(in: view).x
+            guard x > view.bounds.width * 0.5 else { return }
             guard let player = player, player.timeControlStatus == .playing else { return }
+            guard !isBoosting else { return }
             isBoosting = true
             restoreRate = currentRate
             player.rate = 2.0
             boostBadge.isHidden = false
+            setControlsVisible(false)
+
         case .ended, .cancelled, .failed:
             guard isBoosting else { return }
             isBoosting = false
             player?.rate = restoreRate
             boostBadge.isHidden = true
+
         default:
             break
         }
     }
 
+    /// 左右滑 → 快进后退；左半屏上下滑 → 亮度；右半屏上下滑 → 音量
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-        let point = gesture.location(in: gestureView)
-        let width = max(gestureView.bounds.width, 1)
+        let point = gesture.location(in: view)
+        let width = max(view.bounds.width, 1)
 
         switch gesture.state {
         case .began:
@@ -372,8 +397,9 @@ final class NativePlayerViewController: UIViewController {
         case .changed:
             let dx = point.x - panStartPoint.x
             let dy = point.y - panStartPoint.y
+
             if panMode == .undecided {
-                if abs(dx) > abs(dy) * 1.4 && abs(dx) > 12 {
+                if abs(dx) > abs(dy) * 1.3 && abs(dx) > 12 {
                     panMode = .seek
                 } else if abs(dy) > 12 {
                     panMode = panStartPoint.x < width * 0.5 ? .brightness : .volume
@@ -382,7 +408,7 @@ final class NativePlayerViewController: UIViewController {
 
             switch panMode {
             case .seek:
-                let delta = Double(dx / width) * 120.0   // 全屏宽度 ≈ 120 秒
+                let delta = Double(dx / width) * 120.0
                 seekTargetTime = min(max(0, seekStartTime + delta), max(duration, 0))
                 let sign = delta >= 0 ? "+" : "-"
                 hud.show(symbol: delta >= 0 ? "goforward" : "gobackward",
@@ -427,93 +453,85 @@ final class NativePlayerViewController: UIViewController {
             switch result {
             case .success(let url):
                 self.streamURL = url
-                self.prepareLocalPlayback()
+                // 直连成功过就走直连（最快）；历史失败过就直接本地代理
+                if UserDefaults.standard.object(forKey: self.directFlagKey) as? Bool == false {
+                    self.beginProxy()
+                } else {
+                    self.beginDirect()
+                }
             case .failure(let error):
                 self.fallback(reason: error.localizedDescription)
             }
         }
     }
 
-    /// 启动本地代理 → 用「代理地址」做端到端预检（播放列表 + 第一个分片都能取到）→ 交给 AVPlayer
-    private func prepareLocalPlayback() {
+    /// 方案 A：直连 CDN（AVURLAsset 头字典补 Referer）——没有中转，最快
+    private func beginDirect() {
         guard let streamURL = streamURL else {
             fallback(reason: "播放源为空")
             return
         }
-        statusLabel.text = "启动本地代理…"
+        usingLocalProxy = false
+        statusLabel.text = "直连播放…"
+
+        let referer = "https://\(embedURL.host ?? "")/"
+        let asset = AVURLAsset(url: streamURL, options: [
+            "AVURLAssetHTTPHeaderFieldsKey": [
+                "Referer": referer,
+                "User-Agent": StreamResolver.userAgent
+            ]
+        ])
+        attach(asset: asset)
+
+        // 3 秒没就绪 → 判定直连被拦，换本地代理（并记住，下次不再试）
+        let task = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.usingLocalProxy else { return }
+            guard self.player?.currentItem?.status != .readyToPlay else { return }
+            UserDefaults.standard.set(false, forKey: self.directFlagKey)
+            self.beginProxy()
+        }
+        directWatchdog = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: task)
+    }
+
+    /// 方案 B：本地 HTTP 代理（稳，代价是多一跳）
+    private func beginProxy() {
+        directWatchdog?.cancel()
+        directWatchdog = nil
+        guard !usingLocalProxy else { return }
+        guard let streamURL = streamURL else {
+            fallback(reason: "播放源为空")
+            return
+        }
+        usingLocalProxy = true
+        statusLabel.text = "本地代理播放…"
 
         LocalHLSProxy.shared.startIfNeeded()
         let referer = "https://\(embedURL.host ?? "")/"
-        guard let localPlaylist = LocalHLSProxy.shared.localURL(for: streamURL, referer: referer) else {
-            lastFailure = "本地代理启动失败"
-            fallback(reason: lastFailure ?? "本地代理启动失败")
+        guard let local = LocalHLSProxy.shared.localURL(for: streamURL, referer: referer) else {
+            fallback(reason: "本地代理不可用")
             return
         }
+        attach(asset: AVURLAsset(url: local))
+    }
 
-        statusLabel.text = "校验播放源…"
-        fetchText(localPlaylist) { [weak self] playlist in
-            guard let self = self else { return }
-            guard let playlist = playlist, playlist.hasPrefix("#EXTM3U") else {
-                self.lastFailure = "播放列表取不到"
-                self.fallback(reason: "播放列表取不到（403 或被拦截）")
-                return
-            }
-
-            // 再验证第一个分片，确认整条链路通
-            let firstSegment = playlist
-                .components(separatedBy: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .first { !$0.isEmpty && !$0.hasPrefix("#") }
-
-            guard let segmentLine = firstSegment else {
-                self.lastFailure = "播放列表里没有分片"
-                self.fallback(reason: "播放列表里没有分片")
-                return
-            }
-
-            self.statusLabel.text = "校验分片…"
-            let segmentURL = URL(string: segmentLine)
-                ?? URL(string: segmentLine, relativeTo: localPlaylist)?.absoluteURL
-
-            guard let segmentURL = segmentURL else {
-                self.lastFailure = "分片地址无效"
-                self.fallback(reason: "分片地址无效")
-                return
-            }
-
-            self.fetchText(segmentURL) { [weak self] body in
-                guard let self = self else { return }
-                guard let body = body, !body.isEmpty else {
-                    self.fallback(reason: "分片取不到（被拦截）")
-                    return
-                }
-                self.attachPlayer(localURL: localPlaylist)
-            }
+    private func attach(asset: AVURLAsset) {
+        statusObservation = nil
+        if let observer = timeObserver {
+            player?.removeTimeObserver(observer)
+            timeObserver = nil
         }
-    }
+        player?.pause()
+        playerLayer?.removeFromSuperlayer()
+        boostBadge.isHidden = true
+        isBoosting = false
 
-    /// 用普通请求（带 Referer）取文本，用于预检
-    private func fetchText(_ url: URL, completion: @escaping (String?) -> Void) {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 12
-        URLSession.shared.dataTask(with: request) { data, response, _ in
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let text = (status == 200 && data != nil)
-                ? String(decoding: data!, as: UTF8.self)
-                : nil
-            DispatchQueue.main.async { completion(text) }
-        }.resume()
-    }
-
-    private func attachPlayer(localURL: URL) {
         statusLabel.text = "初始化解码…"
 
-        let asset = AVURLAsset(url: localURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         let item = AVPlayerItem(asset: asset)
-        item.preferredForwardBufferDuration = 12
+        item.preferredForwardBufferDuration = 4
 
         let player = AVPlayer(playerItem: item)
-        player.automaticallyWaitsToMinimizeStalling = true
         self.player = player
 
         let layer = AVPlayerLayer(player: player)
@@ -522,25 +540,36 @@ final class NativePlayerViewController: UIViewController {
         layer.backgroundColor = UIColor.black.cgColor
         videoView.layer.addSublayer(layer)
         self.playerLayer = layer
-        startWatchdog()
 
-        statusObservation = item.observe(\.status, options: [.new, .initial]) { [weak self] item, _ in
+        startWatchdog(seconds: usingLocalProxy ? 10 : 4)
+
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 switch item.status {
                 case .readyToPlay:
                     self.cancelWatchdog()
+                    self.directWatchdog?.cancel()
+                    UserDefaults.standard.set(!self.usingLocalProxy, forKey: self.directFlagKey)
                     self.spinner.stopAnimating()
                     self.statusLabel.text = ""
-                    let duration = item.duration.seconds
-                    if duration.isFinite && duration > 0 {
-                        self.duration = duration
-                        self.durationLabel.text = self.timeText(duration)
+                    let seconds = item.duration.seconds
+                    if seconds.isFinite && seconds > 0 {
+                        self.duration = seconds
+                        self.durationLabel.text = self.timeText(seconds)
                     }
-                    player.play()
+                    // 不等大缓冲，立刻出画面
+                    player.playImmediately(atRate: max(self.currentRate, 0.01))
                     self.updatePlayButton()
+
                 case .failed:
-                    self.fallback(reason: item.error?.localizedDescription ?? "解码失败")
+                    if self.usingLocalProxy {
+                        self.fallback(reason: item.error?.localizedDescription ?? "解码失败")
+                    } else {
+                        UserDefaults.standard.set(false, forKey: self.directFlagKey)
+                        self.beginProxy()
+                    }
+
                 default:
                     break
                 }
@@ -553,12 +582,10 @@ final class NativePlayerViewController: UIViewController {
         ) { [weak self] time in
             guard let self = self else { return }
             let seconds = time.seconds
-            if seconds.isFinite {
-                if !self.isDraggingSlider {
-                    self.currentLabel.text = self.timeText(seconds)
-                    if self.duration > 0 {
-                        self.slider.value = Float(min(max(seconds / self.duration, 0), 1))
-                    }
+            if seconds.isFinite && !self.isDraggingSlider {
+                self.currentLabel.text = self.timeText(seconds)
+                if self.duration > 0 {
+                    self.slider.value = Float(min(max(seconds / self.duration, 0), 1))
                 }
             }
             self.updatePlayButton()
@@ -567,15 +594,20 @@ final class NativePlayerViewController: UIViewController {
         setupPiP(with: layer)
     }
 
-    private func startWatchdog() {
+    private func startWatchdog(seconds: TimeInterval) {
         cancelWatchdog()
         let task = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             guard self.player?.currentItem?.status != .readyToPlay else { return }
-            self.fallback(reason: self.lastFailure ?? "10 秒内仍未就绪")
+            if self.usingLocalProxy {
+                self.fallback(reason: "10 秒内仍未就绪")
+            } else {
+                UserDefaults.standard.set(false, forKey: self.directFlagKey)
+                self.beginProxy()
+            }
         }
         watchdog = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: task)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: task)
     }
 
     private func cancelWatchdog() {
