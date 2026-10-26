@@ -74,7 +74,7 @@ final class HLSLocalProxy: NSObject, AVAssetResourceLoaderDelegate {
                 if let type = headers["Content-Type"] {
                     info.contentType = type
                 }
-                info.contentLength = data.count
+                info.contentLength = Int64(data.count)
                 info.isByteRangeAccessSupported = headers["Accept-Ranges"]?.contains("bytes") == true
             }
 
