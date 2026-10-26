@@ -54,6 +54,8 @@ final class NativePlayerViewController: UIViewController {
     private let currentLabel = UILabel()
     private let durationLabel = UILabel()
     private let speedButton = UIButton(type: .system)
+    private let switchButton = UIButton(type: .system)
+    private var watchdog: DispatchWorkItem?
     private let pipButton = UIButton(type: .system)
     private let rotateButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .large)
@@ -157,7 +159,10 @@ final class NativePlayerViewController: UIViewController {
         styleTextButton(speedButton, title: "1.0x")
         speedButton.addTarget(self, action: #selector(showSpeedMenu), for: .touchUpInside)
 
-        let topStack = UIStackView(arrangedSubviews: [closeButton, titleLabel, speedButton])
+        styleIconButton(switchButton, systemName: "arrow.triangle.2.circlepath")
+        switchButton.addTarget(self, action: #selector(switchPlayer), for: .touchUpInside)
+
+        let topStack = UIStackView(arrangedSubviews: [closeButton, titleLabel, switchButton, speedButton])
         topStack.axis = .horizontal
         topStack.spacing = 10
         topStack.alignment = .center
@@ -420,7 +425,6 @@ final class NativePlayerViewController: UIViewController {
             guard let self = self else { return }
             switch result {
             case .success(let streamURL):
-                self.statusLabel.text = ""
                 self.attach(streamURL: streamURL)
             case .failure(let error):
                 self.fallback(reason: error.localizedDescription)
@@ -429,6 +433,36 @@ final class NativePlayerViewController: UIViewController {
     }
 
     private func attach(streamURL: URL) {
+        statusLabel.text = "校验播放源…"
+        precheck(streamURL) { [weak self] ok in
+            guard let self = self else { return }
+            if ok {
+                self.attachVerified(streamURL: streamURL)
+            } else {
+                self.fallback(reason: "播放源不可用（403 或被拦截）")
+            }
+        }
+    }
+
+    /// 先用普通 URLSession 带 Referer 拉一次 master m3u8，确认链路通再交给 AVPlayer
+    private func precheck(_ streamURL: URL, completion: @escaping (Bool) -> Void) {
+        var request = URLRequest(url: streamURL)
+        request.timeoutInterval = 12
+        request.setValue("https://\(embedURL.host ?? "")/", forHTTPHeaderField: "Referer")
+        request.setValue(StreamResolver.userAgent, forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            var head = ""
+            if let data = data, data.count >= 7 {
+                head = String(decoding: data.prefix(7), as: UTF8.self)
+            }
+            let ok = status == 200 && head == "#EXTM3U"
+            DispatchQueue.main.async { completion(ok) }
+        }.resume()
+    }
+
+    private func attachVerified(streamURL: URL) {
         guard let proxyURL = HLSLocalProxy.proxyURL(for: streamURL) else {
             fallback(reason: "地址不支持")
             return
@@ -441,6 +475,7 @@ final class NativePlayerViewController: UIViewController {
         let asset = AVURLAsset(url: proxyURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         asset.resourceLoader.setDelegate(proxy, queue: DispatchQueue(label: "avstream.proxy"))
 
+        statusLabel.text = "初始化解码…"
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 12
 
@@ -454,12 +489,14 @@ final class NativePlayerViewController: UIViewController {
         layer.backgroundColor = UIColor.black.cgColor
         videoView.layer.addSublayer(layer)
         self.playerLayer = layer
+        startWatchdog()
 
         statusObservation = item.observe(\.status, options: [.new, .initial]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 switch item.status {
                 case .readyToPlay:
+                    self.cancelWatchdog()
                     self.spinner.stopAnimating()
                     self.statusLabel.text = ""
                     let d = item.duration.seconds
@@ -470,7 +507,8 @@ final class NativePlayerViewController: UIViewController {
                     player.play()
                     self.updatePlayButton()
                 case .failed:
-                    self.fallback(reason: item.error?.localizedDescription ?? "播放失败")
+                    let detail = self.proxy?.lastErrorText
+                    self.fallback(reason: detail ?? item.error?.localizedDescription ?? "播放失败")
                 default:
                     break
                 }
@@ -495,6 +533,28 @@ final class NativePlayerViewController: UIViewController {
         }
 
         setupPiP(with: layer)
+    }
+
+    private func startWatchdog() {
+        cancelWatchdog()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            guard self.player?.currentItem?.status != .readyToPlay else { return }
+            let detail = self.proxy?.lastErrorText ?? "10 秒内未就绪"
+            self.fallback(reason: detail)
+        }
+        watchdog = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: task)
+    }
+
+    private func cancelWatchdog() {
+        watchdog?.cancel()
+        watchdog = nil
+    }
+
+    @objc private func switchPlayer() {
+        player?.pause()
+        onFallback?(embedURL, titleText)
     }
 
     private func fallback(reason: String) {

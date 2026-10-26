@@ -38,7 +38,20 @@ final class WebAppViewController: UIViewController {
         NotificationCenter.default.removeObserver(self)
     }
 
-    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+    private var appTheme: UIUserInterfaceStyle = .dark
+
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        appTheme == .light ? .darkContent : .lightContent
+    }
+
+    /// 前端切换白天/夜间时同步系统外观（状态栏、弹窗、键盘）
+    private func applyTheme(_ theme: String) {
+        let style: UIUserInterfaceStyle = (theme == "light") ? .light : .dark
+        guard style != appTheme else { return }
+        appTheme = style
+        overrideUserInterfaceStyle = style
+        setNeedsStatusBarAppearanceUpdate()
+    }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .allButUpsideDown
@@ -61,6 +74,7 @@ final class WebAppViewController: UIViewController {
         conf.userContentController.addUserScript(flagScript)
         conf.userContentController.add(bridge, name: NetBridge.handlerName)
         conf.userContentController.add(self, name: "player")
+        conf.userContentController.add(self, name: "theme")
 
         let webView = WKWebView(frame: .zero, configuration: conf)
         webView.navigationDelegate = self
@@ -243,10 +257,9 @@ final class WebAppViewController: UIViewController {
 
     // MARK: - 打开播放器
 
+    /// 播放不再二次验证：只在进入 App 时验证一次
     private func openPlayer(_ url: URL, title: String, code: String) {
-        presentLockIfNeeded(reason: "验证身份后播放", force: true) { [weak self] in
-            self?.startNativePlayer(url, title: title, code: code)
-        }
+        startNativePlayer(url, title: title, code: code)
     }
 
     private func startNativePlayer(_ url: URL, title: String, code: String) {
@@ -285,6 +298,14 @@ final class WebAppViewController: UIViewController {
 extension WebAppViewController: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
+        if message.name == "theme" {
+            if let body = message.body as? [String: Any],
+               let theme = body["theme"] as? String {
+                applyTheme(theme)
+            }
+            return
+        }
+
         guard message.name == "player",
               let body = message.body as? [String: Any],
               let urlString = body["url"] as? String,

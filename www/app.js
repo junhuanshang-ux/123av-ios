@@ -103,10 +103,60 @@ function toast(msg) {
   toastTimer = setTimeout(function () { el.hidden = true; }, 2200);
 }
 
+
+/* ------------------------------ 主题（白天 / 夜间） ------------------------------ */
+var ICON_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
+var ICON_SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M19.1 4.9l-1.7 1.7M6.6 17.4l-1.7 1.7"/></svg>';
+
+var Theme = {
+  KEY: 'theme',
+  current: 'dark',
+  manual: false,
+
+  init: function () {
+    var saved = null;
+    try { saved = localStorage.getItem(Theme.KEY); } catch (e) {}
+    Theme.manual = !!saved;
+    Theme.apply(saved || Theme.systemTheme(), false);
+    if (!saved && window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: light)');
+      var handler = function () { if (!Theme.manual) Theme.apply(Theme.systemTheme(), false); };
+      if (mq.addEventListener) mq.addEventListener('change', handler);
+      else if (mq.addListener) mq.addListener(handler);
+    }
+  },
+
+  systemTheme: function () {
+    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+  },
+
+  apply: function (theme, persist) {
+    Theme.current = theme === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', Theme.current);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', Theme.current === 'light' ? '#f5f6f8' : '#0e0f11');
+    var btn = document.getElementById('themeBtn');
+    if (btn) btn.innerHTML = Theme.current === 'light' ? ICON_MOON : ICON_SUN;
+    if (persist) {
+      Theme.manual = true;
+      try { localStorage.setItem(Theme.KEY, Theme.current); } catch (e) {}
+    }
+    // 通知原生：状态栏与系统控件跟着变
+    if (Native.theme) {
+      try { window.webkit.messageHandlers.theme.postMessage({ theme: Theme.current }); } catch (e) {}
+    }
+  },
+
+  toggle: function () {
+    Theme.apply(Theme.current === 'light' ? 'dark' : 'light', true);
+  }
+};
+
 /* ------------------------------ 网络 ------------------------------ */
 var Native = {
   net: !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.net),
-  player: !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.player)
+  player: !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.player),
+  theme: !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.theme)
 };
 
 var pendingMap = Object.create(null);
@@ -813,6 +863,8 @@ function boot() {
     // App 内：禁用长按弹菜单、双击缩放
     document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
   }
+  Theme.init();
+  document.getElementById('themeBtn').onclick = function () { Theme.toggle(); };
   document.getElementById('searchBtn').onclick = function () {
     location.hash = '#/search';
   };
