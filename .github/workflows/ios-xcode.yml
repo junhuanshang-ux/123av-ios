@@ -1,0 +1,81 @@
+name: iOS Xcode Build
+
+# 由 iBuilder CLI（builder ios build）通过 workflow_dispatch 触发。
+# 产物：123AV-unsigned.ipa（未签名，Sideloadly / AltStore 自签安装）
+on:
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: "Xcode scheme"
+        required: false
+        default: "123AV"
+        type: string
+      build_mode:
+        description: "Build mode (release/debug)"
+        required: false
+        default: "release"
+        type: string
+      configuration:
+        description: "Build configuration"
+        required: false
+        default: "Release"
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 工具链版本
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 安装 XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          xcodegen --version
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译 App（未签名）
+        env:
+          SCHEME: ${{ github.event.inputs.scheme || '123AV' }}
+          CONFIG: ${{ github.event.inputs.configuration || 'Release' }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project 123AV.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIG" \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Products" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: 打包 IPA
+        run: |
+          set -euo pipefail
+          APP_DIR="build/Products/123AV.app"
+          test -d "$APP_DIR"
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP_DIR" out/Payload/
+          # 前端资源随包携带（WKWebView 直接读 Bundle 里的 www/）
+          cp -R www out/Payload/123AV.app/www
+          # 顺带做一次 ad-hoc 签名，侧载工具重签时更省事
+          codesign --force --sign - --timestamp=none out/Payload/123AV.app || true
+          ( cd out && zip -qry ../123AV-unsigned.ipa Payload )
+          ls -lh 123AV-unsigned.ipa
+          unzip -l 123AV-unsigned.ipa | head -20
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 123AV-unsigned-ipa
+          path: 123AV-unsigned.ipa
+          if-no-files-found: error

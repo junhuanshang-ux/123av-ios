@@ -1,0 +1,16 @@
+# 构建产物
+build/
+dist/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.idea/
+.vscode/
+*.xcuserstate
+xcuserdata/
+
+# 本地调试
+*.log

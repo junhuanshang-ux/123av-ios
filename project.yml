@@ -1,0 +1,51 @@
+# XcodeGen 工程描述：在 macOS runner 上 `xcodegen generate` 生成 123AV.xcodeproj
+# 本机（无 Mac）不需要它；只有走 GitHub Actions / 远程构建时才用。
+name: 123AV
+
+options:
+  bundleIdPrefix: com.yidian
+  deploymentTarget:
+    iOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+targets:
+  123AV:
+    type: application
+    platform: iOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources
+      - path: Resources/Assets.xcassets
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.yidian.av123
+        PRODUCT_NAME: "123AV"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # 未签名构建：产物交给侧载工具重签
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        DEVELOPMENT_TEAM: ""
+        ENABLE_BITCODE: "NO"
+        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.0.0"
+
+schemes:
+  123AV:
+    build:
+      targets:
+        123AV: all
+    run:
+      config: Debug
+    archive:
+      config: Release
