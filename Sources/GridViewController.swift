@@ -43,11 +43,11 @@ final class GridViewController: UIViewController {
         setupEmptyView()
 
         switch source {
-        case .genre(_, let title), .list(_, let title):
-            title = title
+        case .genre(_, let screenTitle), .list(_, let screenTitle):
+            self.title = screenTitle
             loadNextPage()
         case .search:
-            title = "搜索"
+            self.title = "搜索"
             emptyView.configure(title: "搜点什么", subtitle: "支持番号、中文标题、女演员、制作商")
             emptyView.isHidden = false
         }

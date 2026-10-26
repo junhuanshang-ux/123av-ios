@@ -10,7 +10,7 @@ final class DetailViewController: UIViewController {
 
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
-    private let posterView = RemoteImageView()
+    private let posterView = RemoteImageView(frame: .zero)
     private let heroContainer = UIView()
     private let playOverlay = UIButton(type: .system)
     private let titleLabel = UILabel()
@@ -101,13 +101,12 @@ final class DetailViewController: UIViewController {
         posterView.translatesAutoresizingMaskIntoConstraints = false
         heroContainer.addSubview(posterView)
 
-        var config = UIButton.Configuration.plain()
-        config.image = UIImage(systemName: "play.fill",
-                               withConfiguration: UIImage.SymbolConfiguration(pointSize: 26, weight: .bold))
-        config.baseForegroundColor = .white
-        config.background.backgroundColor = Palette.accent
-        config.background.cornerRadius = 31
-        playOverlay.configuration = config
+        let symbol = UIImage(systemName: "play.fill",
+                            withConfiguration: UIImage.SymbolConfiguration(pointSize: 26, weight: .bold))
+        playOverlay.setImage(symbol, for: .normal)
+        playOverlay.tintColor = .white
+        playOverlay.backgroundColor = Palette.accent
+        playOverlay.layer.cornerRadius = 31
         playOverlay.translatesAutoresizingMaskIntoConstraints = false
         playOverlay.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
         heroContainer.addSubview(playOverlay)

@@ -67,7 +67,7 @@ final class VideoCardCell: UICollectionViewCell {
 
     static let reuseID = "VideoCardCell"
 
-    private let cover = RemoteImageView()
+    private let cover = RemoteImageView(frame: .zero)
     private let durationLabel = PaddedLabel()
     private let rankLabel = PaddedLabel()
     private let titleLabel = UILabel()
