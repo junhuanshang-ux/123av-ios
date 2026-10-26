@@ -139,7 +139,7 @@ AVPlayer ← avstream:// 本地代理（HLSLocalProxy 补 Referer，CDN 才肯�
 ```
 
 系统原生解码 + 自适应码率 + `preferredForwardBufferDuration = 12s` 预缓冲；
-原生链路失败会自动回退到 embed 网页播放器，保证有兜底。
+**三段保险**：① 取流预检（先带 Referer 拉一次 master m3u8，不是 `#EXTM3U` 立刻回退）② 10 秒看门狗（仍未就绪自动回退）③ 顶栏「切换播放器」按钮手动回退到 embed 网页播放器。
 
 手势（`NativePlayerViewController`）：
 
@@ -158,6 +158,12 @@ AVPlayer ← avstream:// 本地代理（HLSLocalProxy 补 Referer，CDN 才肯�
 - 桌面名称「邮件」，图标为邮件样式（自绘，非 Apple 素材）
 - 启动、回到前台（超过 60 秒宽限）、打开播放器都要面容验证
 - 切后台立刻盖纯色遮罩，多任务快照里看不到任何内容
+- **只在进入 App 时验证**（冷启动、回前台超 60 秒）；进入播放器不再二次验证
+
+### 白天 / 夜间模式
+
+右上角太阳/月亮图标一键切换，选择记在 `localStorage`；首次启动跟随系统 `prefers-color-scheme`。
+切换时通过 `theme` 通道通知原生，状态栏与系统弹窗一起变。
 
 ---
 
