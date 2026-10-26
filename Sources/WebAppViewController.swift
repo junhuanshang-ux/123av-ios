@@ -3,7 +3,8 @@ import WebKit
 import SafariServices
 
 /// 应用主界面：一个全屏 WKWebView，加载打包在 App 里的前端（www/index.html）。
-/// 前端所有远程请求都通过 NetBridge 走原生；播放通过原生全屏播放器打开。
+/// 前端所有远程请求都通过 NetBridge 走原生；播放交给原生播放器。
+/// 进入应用 / 进入播放器都要求面容（或锁屏密码）验证；切后台时用纯色遮罩挡住快照。
 final class WebAppViewController: UIViewController {
 
     private let bridge = NetBridge()
@@ -11,13 +12,30 @@ final class WebAppViewController: UIViewController {
     private let refreshControl = UIRefreshControl()
     private var localRoot: URL?
 
+    /// 隐私遮挡（App 切换器快照、未解锁时挡住内容）
+    private let coverView = UIView()
+
     // MARK: - 生命周期
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
         setupWebView()
+        setupPrivacyCover()
+        observeAppLifecycle()
         loadLocalApp()
+        coverView.isHidden = AuthGate.isFresh
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        presentLockIfNeeded(reason: "验证身份以进入邮件") { [weak self] in
+            self?.hideCover()
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
@@ -37,7 +55,6 @@ final class WebAppViewController: UIViewController {
         conf.defaultWebpagePreferences.allowsContentJavaScript = true
         conf.websiteDataStore = .default()
 
-        // 标记 App 环境，前端据此走原生桥
         let flagScript = WKUserScript(source: "window.__APP__ = true;",
                                       injectionTime: .atDocumentStart,
                                       forMainFrameOnly: true)
@@ -113,21 +130,145 @@ final class WebAppViewController: UIViewController {
         ])
     }
 
-    // MARK: - 页面内的外部链接 / 播放器
+    // MARK: - 隐私遮挡 & 生命周期
+
+    private func setupPrivacyCover() {
+        coverView.backgroundColor = .black
+        coverView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(coverView)
+
+        let icon = UIImageView(image: UIImage(systemName: "envelope.fill"))
+        icon.tintColor = UIColor(white: 1, alpha: 0.55)
+        icon.contentMode = .scaleAspectFit
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = UILabel()
+        label.text = "邮件"
+        label.textColor = UIColor(white: 1, alpha: 0.55)
+        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        coverView.addSubview(icon)
+        coverView.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            coverView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            coverView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            coverView.topAnchor.constraint(equalTo: view.topAnchor),
+            coverView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            icon.centerXAnchor.constraint(equalTo: coverView.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: coverView.centerYAnchor, constant: -10),
+            icon.widthAnchor.constraint(equalToConstant: 42),
+            icon.heightAnchor.constraint(equalToConstant: 32),
+
+            label.centerXAnchor.constraint(equalTo: coverView.centerXAnchor),
+            label.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 10)
+        ])
+    }
+
+    private func showCover() {
+        coverView.isHidden = false
+    }
+
+    private func hideCover() {
+        coverView.isHidden = true
+    }
+
+    private func observeAppLifecycle() {
+        let center = NotificationCenter.default
+        center.addObserver(self,
+                           selector: #selector(appWillResignActive),
+                           name: UIApplication.willResignActiveNotification,
+                           object: nil)
+        center.addObserver(self,
+                           selector: #selector(appDidBecomeActive),
+                           name: UIApplication.didBecomeActiveNotification,
+                           object: nil)
+    }
+
+    @objc private func appWillResignActive() {
+        // 立刻挡住画面：多任务快照里只会看到纯黑
+        showCover()
+    }
+
+    @objc private func appDidBecomeActive() {
+        if AuthGate.isFresh {
+            hideCover()
+            return
+        }
+        presentLockIfNeeded(reason: "验证身份以继续") { [weak self] in
+            self?.hideCover()
+        }
+    }
+
+    // MARK: - 验证闸门
+
+    /// 需要验证时弹出全屏验证页；已通过（宽限期内）直接执行 completion
+    private func presentLockIfNeeded(reason: String, completion: (() -> Void)? = nil) {
+        if AuthGate.isFresh {
+            completion?()
+            return
+        }
+        if presentedViewController is LockViewController {
+            return
+        }
+
+        let lock = LockViewController()
+        lock.modalPresentationStyle = .overFullScreen
+        lock.modalTransitionStyle = .crossDissolve
+        lock.onUnlocked = { [weak self] in
+            self?.hideCover()
+            completion?()
+        }
+        topPresenter.present(lock, animated: true, completion: nil)
+    }
+
+    /// 最顶层的控制器（播放器等已经 present 时，验证页要弹在它上面）
+    private var topPresenter: UIViewController {
+        var controller: UIViewController = self
+        while let presented = controller.presentedViewController, !presented.isBeingDismissed {
+            controller = presented
+        }
+        return controller
+    }
+
+    // MARK: - 打开播放器
+
+    private func openPlayer(_ url: URL, title: String, code: String) {
+        presentLockIfNeeded(reason: "验证身份后播放") { [weak self] in
+            self?.startNativePlayer(url, title: title, code: code)
+        }
+    }
+
+    private func startNativePlayer(_ url: URL, title: String, code: String) {
+        let player = NativePlayerViewController(embedURL: url, title: title, code: code)
+        player.onFallback = { [weak self] embedURL, embedTitle in
+            guard let self = self else { return }
+            self.dismiss(animated: false) {
+                self.presentEmbedPlayer(embedURL, title: embedTitle)
+            }
+        }
+        player.modalPresentationStyle = .fullScreen
+        present(player, animated: true, completion: nil)
+    }
+
+    private func presentEmbedPlayer(_ url: URL, title: String) {
+        let fallback = PlayerViewController(url: url, titleText: title)
+        fallback.modalPresentationStyle = .fullScreen
+        present(fallback, animated: true, completion: nil)
+    }
+
+    // MARK: - 页面内的外部链接
 
     private func presentSafari(_ url: URL) {
-        guard url.scheme?.lowercased() == "https" || url.scheme?.lowercased() == "http" else {
+        let scheme = url.scheme?.lowercased() ?? ""
+        guard scheme == "https" || scheme == "http" else {
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
             return
         }
         let vc = SFSafariViewController(url: url)
         vc.preferredControlTintColor = UIColor(red: 0.91, green: 0.24, blue: 0.55, alpha: 1)
-        present(vc, animated: true)
-    }
-
-    private func openPlayer(_ url: URL, title: String) {
-        let vc = PlayerViewController(url: url, titleText: title)
-        vc.modalPresentationStyle = .fullScreen
         present(vc, animated: true)
     }
 }
@@ -140,7 +281,9 @@ extension WebAppViewController: WKScriptMessageHandler {
               let body = message.body as? [String: Any],
               let urlString = body["url"] as? String,
               let url = URL(string: urlString) else { return }
-        openPlayer(url, title: (body["title"] as? String) ?? "")
+        openPlayer(url,
+                   title: (body["title"] as? String) ?? "",
+                   code: (body["code"] as? String) ?? "")
     }
 }
 
@@ -155,13 +298,11 @@ extension WebAppViewController: WKNavigationDelegate {
             return
         }
 
-        // 本地页面（含 hash 路由）一律放行
         if url.isFileURL {
             decisionHandler(.allow)
             return
         }
 
-        // 任何远程地址都不在 WebView 里打开，避免把应用变成简易浏览器
         decisionHandler(.cancel)
         presentSafari(url)
     }

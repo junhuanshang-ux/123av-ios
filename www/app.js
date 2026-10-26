@@ -699,7 +699,7 @@ function renderDetail(root, code) {
     function play(idx) {
       var ep = d.episodes[idx || 0];
       if (!ep || !ep.url) { toast('暂无播放源'); return; }
-      openPlayer(ep.url, d.title || d.code);
+      openPlayer(ep.url, d.title || d.code, d.code);
     }
 
     document.getElementById('playBtn').onclick = function () { play(0); };
@@ -722,9 +722,9 @@ function renderDetail(root, code) {
 }
 
 /* ------------------------------ 播放器 ------------------------------ */
-function openPlayer(url, title) {
+function openPlayer(url, title, code) {
   if (Native.player) {
-    window.webkit.messageHandlers.player.postMessage({ url: url, title: title || '' });
+    window.webkit.messageHandlers.player.postMessage({ url: url, title: title || '', code: code || '' });
     return;
   }
   var wrap = document.createElement('div');
