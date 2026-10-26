@@ -112,8 +112,11 @@ final class LockViewController: UIViewController {
     }
 
     private func finish() {
-        onUnlocked?()
+        // 先等 dismiss 完成再回调，否则调用方紧接着 present 播放器会失败
+        let callback = onUnlocked
         onUnlocked = nil
-        dismiss(animated: true, completion: nil)
+        dismiss(animated: true) {
+            callback?()
+        }
     }
 }

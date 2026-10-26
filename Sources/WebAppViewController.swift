@@ -205,8 +205,16 @@ final class WebAppViewController: UIViewController {
     // MARK: - 验证闸门
 
     /// 需要验证时弹出全屏验证页；已通过（宽限期内）直接执行 completion
-    private func presentLockIfNeeded(reason: String, completion: (() -> Void)? = nil) {
-        if AuthGate.isFresh {
+    private func presentLockIfNeeded(reason: String,
+                                     force: Bool = false,
+                                     completion: (() -> Void)? = nil) {
+        if force {
+            // 播放器：每次都验证（只容忍 5 秒内的重复触发）
+            if AuthGate.fresh(within: AuthGate.playerGrace) {
+                completion?()
+                return
+            }
+        } else if AuthGate.isFresh {
             completion?()
             return
         }
@@ -236,7 +244,7 @@ final class WebAppViewController: UIViewController {
     // MARK: - 打开播放器
 
     private func openPlayer(_ url: URL, title: String, code: String) {
-        presentLockIfNeeded(reason: "验证身份后播放") { [weak self] in
+        presentLockIfNeeded(reason: "验证身份后播放", force: true) { [weak self] in
             self?.startNativePlayer(url, title: title, code: code)
         }
     }

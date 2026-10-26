@@ -1,13 +1,14 @@
-# 123AV · iOS 客户端（含站点接口逆向分析）
+# 123AV · iOS 客户端（App 名「邮件」，含站点接口逆向分析）
 
-把 `https://123av.com/cn` 做成一个能装进 iPhone 的 App。仓库里同时包含**接口分析**与**客户端源码**。
+把 `https://123av.com/cn` 做成一个能装进 iPhone 的 App，**桌面显示为「邮件」+ 邮件图标**，
+进入应用与进入播放器都要**面容 ID / 锁屏密码**验证。仓库里同时包含**接口分析**与**客户端源码**。
 
 | 交付物 | 路径 | 说明 |
 | --- | --- | --- |
 | 接口/分类分析报告 | [`docs/API.md`](docs/API.md) | 推荐 API 签名算法、播放链路、封面规则、分类体系，全部实测 |
 | 分类全量数据 | [`docs/categories.json`](docs/categories.json) | 499 个分类（slug + 中文名 + 影片数）+ 479 条标签映射 |
 | 客户端前端 | `www/` | 原生手感的三 tab 应用（推荐/分类/搜索）+ 详情页，纯静态、离线可跑 |
-| iOS 原生壳 | `Sources/` | WKWebView + 原生网络桥 + 全屏播放器（4 个 Swift 文件，零第三方依赖） |
+| iOS 原生壳 | `Sources/` | WKWebView + 原生网络桥 + **原生 AVPlayer 播放器** + 面容解锁（8 个 Swift 文件，零第三方依赖） |
 | 构建 | `scripts/build-ipa.sh` | macOS 上一条命令出**未签名 IPA**（不用 Xcode 工程文件） |
 | CI | `.github/workflows/build-ipa.yml` | 没 Mac 也能出 IPA：push 到 GitHub 直接拿产物 |
 | 免构建方案 | `webclip/123AV.mobileconfig` | 描述文件，装完桌面就有全屏图标 |
@@ -126,6 +127,38 @@ node scripts/dev-server.mjs        # 需要 Node 18+
   拦掉 `window.open`、拦截一切非原站导航 —— 广告跳转无效。
 - **原生体感**：下拉刷新、状态栏/安全区适配、深色模式、横屏播放、静音键下继续出声。
 
+### 播放器（原生 AVPlayer，不再走网页播放器）
+
+手机端「播放慢」的根因是原来在 WKWebView 里跑站点的 embed 页（hls.js + plyr），
+解码和缓冲都受 WebKit 限制。现在改成：
+
+```
+embed 地址 → StreamResolver 解析 /stream → 拿到 video.m3u8
+                                   ↓
+AVPlayer ← avstream:// 本地代理（HLSLocalProxy 补 Referer，CDN 才肯放行）
+```
+
+系统原生解码 + 自适应码率 + `preferredForwardBufferDuration = 12s` 预缓冲；
+原生链路失败会自动回退到 embed 网页播放器，保证有兜底。
+
+手势（`NativePlayerViewController`）：
+
+| 操作 | 效果 |
+| --- | --- |
+| 按住右半屏 | 2 倍速播放，松手恢复原速 |
+| 左半屏上下滑 | 亮度 |
+| 右半屏上下滑 | 音量 |
+| 屏幕左右滑 | 快进 / 后退（全宽 ≈ 120 秒，带时间提示） |
+| 双击左 / 右 / 中间 | -10 秒 / +10 秒 / 播放暂停 |
+| 单击 | 显示或隐藏控制条 |
+| 控制条 | 进度拖动、倍速（0.5–2.0）、画中画、横竖屏 |
+
+### 伪装与安全
+
+- 桌面名称「邮件」，图标为邮件样式（自绘，非 Apple 素材）
+- 启动、回到前台（超过 60 秒宽限）、打开播放器都要面容验证
+- 切后台立刻盖纯色遮罩，多任务快照里看不到任何内容
+
 ---
 
 ## 六、目录结构
@@ -137,12 +170,17 @@ node scripts/dev-server.mjs        # 需要 Node 18+
 │  ├─ app.css               深色主题
 │  ├─ app.js                路由 / 视图 / 解析 / 接口
 │  └─ md5.js                封面 CDN 需要的 MD5（已与 Node crypto 对拍）
-├─ Sources/                 原生（4 个文件，无第三方依赖）
+├─ Sources/                 原生（8 个文件，无第三方依赖）
 │  ├─ AppDelegate.swift
 │  ├─ SceneDelegate.swift
-│  ├─ WebAppViewController.swift   WKWebView 容器 + 导航策略 + JS 弹窗
-│  ├─ NetBridge.swift              JS ⇄ URLSession 网络桥
-│  └─ PlayerViewController.swift   全屏播放器（弹窗拦截）
+│  ├─ WebAppViewController.swift      WKWebView 容器 + 导航策略 + 验证闸门 + 隐私遮罩
+│  ├─ NetBridge.swift                 JS ⇄ URLSession 网络桥
+│  ├─ AuthGate.swift                 面容 / 锁屏密码验证（含 60 秒宽限）
+│  ├─ LockViewController.swift        全屏验证页
+│  ├─ StreamResolver.swift            embed → /stream → m3u8
+│  ├─ HLSLocalProxy.swift             HLS 本地代理（补 Referer）
+│  ├─ NativePlayerViewController.swift 原生播放器 + 全套手势
+│  └─ PlayerViewController.swift      兜底播放器（embed 页）
 ├─ Resources/
 │  ├─ Info.plist            Bundle 信息（iOS 14+，arm64）
 │  ├─ Assets.xcassets/      App 图标（1024）+ 启动色
@@ -167,7 +205,9 @@ node scripts/dev-server.mjs        # 需要 Node 18+
 | 想改什么 | 改哪里 |
 | --- | --- |
 | 启动页 / 站点地址 | `www/app.js` 顶部 `CFG.SITE`、`CFG.LOCALE`、`CFG.URL_LOCALE` |
-| App 名字 | `Resources/Info.plist` 的 `CFBundleDisplayName`、`CFBundleName` |
+| App 名字 | `Resources/Info.plist` 的 `CFBundleDisplayName`、`CFBundleName`（当前：邮件） |
+| 解锁宽限时长 | `Sources/AuthGate.swift` 的 `grace`（默认 60 秒） |
+| 播放器手势灵敏度 | `NativePlayerViewController.swift` 里 `handlePan` 的 220 / 120 系数 |
 | Bundle ID | `Resources/Info.plist` 的 `CFBundleIdentifier`（或构建时 `BUNDLE_ID=`） |
 | 图标 | 换 `Resources/brand/logo-square.png` 后跑 `python tools/make_icons.py` |
 | 最低系统 | `Info.plist` 的 `MinimumOSVersion` + 构建时 `MIN_IOS=15.0` |

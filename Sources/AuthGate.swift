@@ -6,13 +6,20 @@ import LocalAuthentication
 /// - 进入播放器也验证（有 grace 秒宽限，避免连看多集时反复扫脸）。
 enum AuthGate {
 
-    /// 解锁后的宽限时间：这段时间内再次播放/切前后台不重复验证
+    /// 进入 App / 回到前台 的宽限时间
     static let grace: TimeInterval = 60
+
+    /// 打开播放器时的宽限：只容忍"刚验证完又点了一下"的重复触发
+    static let playerGrace: TimeInterval = 5
 
     private(set) static var lastSuccessAt: Date = .distantPast
 
     static var isFresh: Bool {
         Date().timeIntervalSince(lastSuccessAt) < grace
+    }
+
+    static func fresh(within seconds: TimeInterval) -> Bool {
+        Date().timeIntervalSince(lastSuccessAt) < seconds
     }
 
     static func markSuccess() {

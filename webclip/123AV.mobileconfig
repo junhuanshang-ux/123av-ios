@@ -189,11 +189,11 @@
 			<key>IsRemovable</key>
 			<true/>
 			<key>Label</key>
-			<string>123AV</string>
+			<string>邮件</string>
 			<key>PayloadDescription</key>
-			<string>主屏幕快捷入口</string>
+			<string>邮件</string>
 			<key>PayloadDisplayName</key>
-			<string>123AV Web Clip</string>
+			<string>邮件 Web Clip</string>
 			<key>PayloadIdentifier</key>
 			<string>com.yidian.av123.webclip</string>
 			<key>PayloadType</key>
@@ -209,9 +209,9 @@
 		</dict>
 	</array>
 	<key>PayloadDescription</key>
-	<string>在桌面生成一个全屏打开 123AV 的图标（无需越狱/签名）</string>
+	<string>在桌面生成一个「邮件」图标（全屏打开，无需越狱/签名）</string>
 	<key>PayloadDisplayName</key>
-	<string>123AV 主屏幕图标</string>
+	<string>邮件 主屏幕图标</string>
 	<key>PayloadIdentifier</key>
 	<string>com.yidian.av123.profile</string>
 	<key>PayloadOrganization</key>
