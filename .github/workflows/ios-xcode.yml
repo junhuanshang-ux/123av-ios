@@ -21,10 +21,15 @@ on:
         default: "Release"
         type: string
 
+# 同一次推送只保留最新一次构建，队列里排队中的旧任务会被自动取消
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: macos-latest
-    timeout-minutes: 30
+    runs-on: macos-14
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,9 +39,16 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: 安装 XcodeGen
+      - name: 安装 XcodeGen（预编译包，比 brew 快约 1 分钟）
         run: |
-          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          if ! command -v xcodegen >/dev/null; then
+            (
+              curl -fsSL -o /tmp/xcodegen.zip \
+                https://github.com/yonaskolb/XcodeGen/releases/download/2.44.1/xcodegen.zip \
+              && unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen \
+              && sudo cp -R /tmp/xcodegen/xcodegen/* /usr/local/bin/ \
+            ) || brew install xcodegen
+          fi
           xcodegen --version
 
       - name: 生成 Xcode 工程
@@ -56,7 +68,7 @@ jobs:
             -derivedDataPath build \
             CONFIGURATION_BUILD_DIR="$PWD/build/Products" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            clean build
+            build
 
       - name: 打包 IPA
         run: |

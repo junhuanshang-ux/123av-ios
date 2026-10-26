@@ -1,41 +1,98 @@
 import Foundation
 import Network
 
-/// App 内置的本地 HLS 代理。
+/// App 内置的本地 HLS 代理（高性能版）。
 ///
-/// 为什么不用 AVAssetResourceLoader：它在 HLS 场景下并不可靠（播放列表/分片经常根本不进代理），
-/// 实测就是"点了不播"。这里改成业界通行的做法：在 127.0.0.1 起一个极小 HTTP 服务，
-/// AVPlayer 播放 `http://127.0.0.1:<port>/p?r=<referer>&u=<目标>`，
-/// 由代理去上游取数据（补 Referer/UA），并把播放列表里的相对地址改写成代理地址。
-final class LocalHLSProxy {
+/// 背景：CDN 对播放列表**和每一个分片**都要求 `Referer: https://sadie-shop.site/`，
+/// 不带就 403；而 AVPlayer 无法自定义请求头，所以必须有一次本地中转。
+///
+/// 为了把中转开销压到最低，这里做了三件事：
+///   1. **流式透传**：上游一到字节就往下发（带 Content-Length），不再整段下载完再回；
+///   2. **播放列表预取**：解析完 m3u8 就把前若干段并发拉进缓存，AVPlayer 请求时直接命中；
+///   3. **分片缓存**：32MB LRU，拖动/回看不用重新下载。
+final class LocalHLSProxy: NSObject {
 
     static let shared = LocalHLSProxy()
 
+    // MARK: - 状态
+
     private let queue = DispatchQueue(label: "com.yidian.hlsproxy")
-    private let urlSession: URLSession
     private var listener: NWListener?
     private(set) var port: UInt16 = 0
     private var started = false
 
-    // 缓存：播放列表与最近的分片（改善起播与拖动）
+    private lazy var session: URLSession = URLSession(configuration: {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 60
+        config.httpMaximumConnectionsPerHost = 8
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.httpShouldUsePipelining = true
+        return config
+    }(), delegate: self, delegateQueue: nil)
+
+    /// taskIdentifier → 正在透传的上下文
+    private var relays: [Int: Relay] = [:]
+    private let relayLock = NSLock()
+
+    private func setRelay(_ relay: Relay?, for id: Int) {
+        relayLock.lock()
+        defer { relayLock.unlock() }
+        relays[id] = relay
+    }
+
+    private func relay(for id: Int) -> Relay? {
+        relayLock.lock()
+        defer { relayLock.unlock() }
+        return relays[id]
+    }
+
+    private final class Relay {
+        let connection: NWConnection
+        let target: URL
+        var isPlaylist: Bool
+        var headerSent = false
+        var buffer = Data()
+
+        init(connection: NWConnection, target: URL, isPlaylist: Bool) {
+            self.connection = connection
+            self.target = target
+            self.isPlaylist = isPlaylist
+        }
+    }
+
+    // MARK: - 缓存
+
     private let cacheLock = NSLock()
     private var cache: [String: Data] = [:]
     private var cacheOrder: [String] = []
     private var cacheBytes = 0
-    private let cacheLimit = 8 * 1024 * 1024
+    private let cacheLimit = 32 * 1024 * 1024
 
-    private init() {
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 20
-        cfg.timeoutIntervalForResource = 60
-        cfg.httpMaximumConnectionsPerHost = 8
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        urlSession = URLSession(configuration: cfg)
+    private func cached(_ key: String) -> Data? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cache[key]
+    }
+
+    private func store(_ key: String, _ data: Data) {
+        guard !data.isEmpty else { return }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard cache[key] == nil else { return }
+        cache[key] = data
+        cacheOrder.append(key)
+        cacheBytes += data.count
+        while cacheBytes > cacheLimit, let oldest = cacheOrder.first {
+            cacheOrder.removeFirst()
+            if let removed = cache.removeValue(forKey: oldest) {
+                cacheBytes -= removed.count
+            }
+        }
     }
 
     // MARK: - 生命周期
 
-    /// 启动代理，返回监听端口（0 表示启动失败）
     @discardableResult
     func startIfNeeded() -> UInt16 {
         if started { return port }
@@ -59,7 +116,7 @@ final class LocalHLSProxy {
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    if let p = listener.port { assigned = p.rawValue }
+                    if let value = listener.port { assigned = value.rawValue }
                     semaphore.signal()
                 case .failed, .cancelled:
                     semaphore.signal()
@@ -110,7 +167,6 @@ final class LocalHLSProxy {
         return String(data: data, encoding: .utf8)
     }
 
-    /// 上游地址 → 本地代理地址
     func localURL(for remote: URL, referer: String) -> URL? {
         guard port > 0 else { return nil }
         let u = LocalHLSProxy.encode(remote.absoluteString)
@@ -121,7 +177,7 @@ final class LocalHLSProxy {
         return URL(string: "http://127.0.0.1:\(port)/p/\(name)?r=\(r)&u=\(u)")
     }
 
-    // MARK: - 连接处理
+    // MARK: - 连接
 
     private func accept(_ connection: NWConnection) {
         connection.stateUpdateHandler = { [weak self] state in
@@ -162,106 +218,95 @@ final class LocalHLSProxy {
             return
         }
         let parts = requestLine.components(separatedBy: " ")
-        guard parts.count >= 2, parts[0] == "GET",
-              let components = URLComponents(string: parts[1]) else {
+        guard parts.count >= 2, let components = URLComponents(string: parts[1]) else {
             respond(connection, status: 400, body: Data())
             return
         }
 
         let items = components.queryItems ?? []
-        let refererEncoded = items.first(where: { $0.name == "r" })?.value ?? ""
-        let targetEncoded = items.first(where: { $0.name == "u" })?.value ?? ""
-        let referer = LocalHLSProxy.decode(refererEncoded) ?? ""
-
-        guard let targetString = LocalHLSProxy.decode(targetEncoded),
+        let referer = LocalHLSProxy.decode(items.first(where: { $0.name == "r" })?.value ?? "") ?? ""
+        guard let targetString = LocalHLSProxy.decode(items.first(where: { $0.name == "u" })?.value ?? ""),
               let target = URL(string: targetString) else {
             respond(connection, status: 400, body: Data())
             return
         }
 
+        // 缓存命中：直接整段返回（最快路径）
         if let hit = cached(target.absoluteString) {
-            deliver(hit, target: target, mime: nil, referer: referer, connection: connection)
+            if hit.starts(with: Data("#EXTM3U".utf8)) {
+                let rewritten = rewritePlaylist(String(decoding: hit, as: UTF8.self), base: target, referer: referer)
+                respond(connection, status: 200,
+                        contentType: "application/vnd.apple.mpegurl",
+                        body: Data(rewritten.utf8))
+            } else {
+                respond(connection, status: 200,
+                        contentType: mimeType(for: target, from: nil, body: hit),
+                        body: hit)
+            }
             return
         }
 
-        fetch(target, referer: referer) { [weak self] data, mime, error in
-            guard let self = self else { return }
-            guard let data = data, error == nil else {
-                self.respond(connection, status: 502, body: Data())
-                return
-            }
-            self.store(target.absoluteString, data)
-            self.deliver(data, target: target, mime: mime, referer: referer, connection: connection)
-        }
-    }
-
-    /// 把上游字节回给 AVPlayer（播放列表先改写）
-    private func deliver(_ data: Data,
-                         target: URL,
-                         mime: String?,
-                         referer: String,
-                         connection: NWConnection) {
         let isPlaylist = target.path.lowercased().hasSuffix(".m3u8")
-            || data.starts(with: Data("#EXTM3U".utf8))
+        let relay = Relay(connection: connection, target: target, isPlaylist: isPlaylist)
 
-        if isPlaylist {
-            let text = String(decoding: data, as: UTF8.self)
-            let rewritten = rewritePlaylist(text, base: target, referer: referer)
-            respond(connection,
-                    status: 200,
-                    contentType: "application/vnd.apple.mpegurl",
-                    body: Data(rewritten.utf8))
-        } else {
-            respond(connection,
-                    status: 200,
-                    contentType: mimeType(for: target, from: mime, body: data),
-                    body: data)
-        }
-    }
-
-    // MARK: - 上游请求
-
-    private func cached(_ key: String) -> Data? {
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        return cache[key]
-    }
-
-    private func store(_ key: String, _ data: Data) {
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        guard cache[key] == nil else { return }
-        cache[key] = data
-        cacheOrder.append(key)
-        cacheBytes += data.count
-        while cacheBytes > cacheLimit, let oldest = cacheOrder.first {
-            cacheOrder.removeFirst()
-            if let removed = cache.removeValue(forKey: oldest) {
-                cacheBytes -= removed.count
-            }
-        }
-    }
-
-    private func fetch(_ url: URL, referer: String, completion: @escaping (Data?, String?, Error?) -> Void) {
-        var request = URLRequest(url: url)
-        if !referer.isEmpty {
-            request.setValue(referer, forHTTPHeaderField: "Referer")
-        }
+        var request = URLRequest(url: target)
+        request.setValue(referer, forHTTPHeaderField: "Referer")
         request.setValue(StreamResolver.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("*/*", forHTTPHeaderField: "Accept")
 
-        urlSession.dataTask(with: request) { data, response, error in
-            completion(data, (response as? HTTPURLResponse)?.mimeType, error)
-        }.resume()
+        let task = session.dataTask(with: request)
+        setRelay(relay, for: task.taskIdentifier)
+        task.resume()
     }
 
-    /// 分片被伪装成 .css / .svg / .webp，按 MPEG-TS 同步字节（0x47）识别最可靠
+    // MARK: - 响应
+
+    private func respond(_ connection: NWConnection,
+                         status: Int,
+                         contentType: String = "application/octet-stream",
+                         body: Data) {
+        let reason: String
+        switch status {
+        case 200: reason = "OK"
+        case 400: reason = "Bad Request"
+        case 502: reason = "Bad Gateway"
+        default: reason = "Error"
+        }
+
+        var header = "HTTP/1.1 \(status) \(reason)\r\n"
+        header += "Content-Type: \(contentType)\r\n"
+        header += "Content-Length: \(body.count)\r\n"
+        header += "Access-Control-Allow-Origin: *\r\n"
+        header += "Connection: close\r\n\r\n"
+
+        var payload = Data(header.utf8)
+        payload.append(body)
+
+        connection.send(content: payload, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
+    /// 流式响应：先发头，再按块发数据
+    private func beginStream(_ connection: NWConnection,
+                             contentType: String,
+                             contentLength: Int64) {
+        var header = "HTTP/1.1 200 OK\r\n"
+        header += "Content-Type: \(contentType)\r\n"
+        if contentLength > 0 {
+            header += "Content-Length: \(contentLength)\r\n"
+        }
+        header += "Access-Control-Allow-Origin: *\r\n"
+        header += "Connection: close\r\n\r\n"
+        connection.send(content: Data(header.utf8), completion: .contentProcessed { _ in })
+    }
+
     private func mimeType(for url: URL, from serverMime: String?, body: Data) -> String {
-        if body.count > 188, body.first == 0x47 {
+        if body.first == 0x47 { return "video/mp2t" }
+        let path = url.path.lowercased()
+        for suffix in [".ts", ".css", ".webp", ".svg", ".jpg", ".jpeg", ".png"] where path.hasSuffix(suffix) {
             return "video/mp2t"
         }
-        let path = url.path.lowercased()
-        if path.hasSuffix(".ts") || path.hasSuffix(".css") { return "video/mp2t" }
         if path.hasSuffix(".m4s") || path.hasSuffix(".mp4") || path.hasSuffix(".m4v") { return "video/mp4" }
         if path.hasSuffix(".aac") { return "audio/aac" }
         if path.hasSuffix(".key") { return "application/octet-stream" }
@@ -290,10 +335,8 @@ final class LocalHLSProxy {
         return output.joined(separator: "\n")
     }
 
-    /// 处理 #EXT-X-KEY / #EXT-X-MAP / #EXT-X-MEDIA 里的 URI="..."
     private func rewriteURIAttributes(in line: String, base: URL, referer: String) -> String {
         guard line.contains("URI=\"") else { return line }
-
         var result = ""
         var rest = Substring(line)
         while let marker = rest.range(of: "URI=\"") {
@@ -317,30 +360,111 @@ final class LocalHLSProxy {
         return result
     }
 
-    // MARK: - 响应
+    // MARK: - 预取
 
-    private func respond(_ connection: NWConnection,
-                         status: Int,
-                         contentType: String = "application/octet-stream",
-                         body: Data) {
-        let reason: String
-        switch status {
-        case 200: reason = "OK"
-        case 400: reason = "Bad Request"
-        default: reason = "Bad Gateway"
+    /// 播放列表返回后，把前若干段并发拉进缓存，AVPlayer 请求时直接命中
+    private func prefetch(localPlaylist: String, referer: String, count: Int = 6) {
+        var targets: [URL] = []
+        for line in localPlaylist.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            guard let components = URLComponents(string: trimmed),
+                  let encoded = components.queryItems?.first(where: { $0.name == "u" })?.value,
+                  let targetString = LocalHLSProxy.decode(encoded),
+                  let target = URL(string: targetString) else { continue }
+            targets.append(target)
+            if targets.count >= count { break }
         }
 
-        var header = "HTTP/1.1 \(status) \(reason)\r\n"
-        header += "Content-Type: \(contentType)\r\n"
-        header += "Content-Length: \(body.count)\r\n"
-        header += "Access-Control-Allow-Origin: *\r\n"
-        header += "Connection: close\r\n\r\n"
+        for target in targets {
+            if cached(target.absoluteString) != nil { continue }
+            var request = URLRequest(url: target)
+            request.setValue(referer, forHTTPHeaderField: "Referer")
+            request.setValue(StreamResolver.userAgent, forHTTPHeaderField: "User-Agent")
 
-        var payload = Data(header.utf8)
-        payload.append(body)
+            session.dataTask(with: request) { [weak self] data, _, _ in
+                guard let self = self, let data = data, !data.isEmpty else { return }
+                self.store(target.absoluteString, data)
+            }.resume()
+        }
+    }
+}
 
-        connection.send(content: payload, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+// MARK: - 上游数据流
+
+extension LocalHLSProxy: URLSessionDataDelegate {
+
+    func urlSession(_ session: URLSession,
+                    dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let relay = relay(for: dataTask.taskIdentifier),
+           let http = response as? HTTPURLResponse {
+            relay.isPlaylist = relay.isPlaylist || (http.mimeType ?? "").contains("mpegurl")
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let relay = relay(for: dataTask.taskIdentifier) else { return }
+
+        if relay.isPlaylist {
+            // 播放列表很小，攒完再改写
+            relay.buffer.append(data)
+            return
+        }
+
+        // 分片：边收边发
+        if !relay.headerSent {
+            relay.headerSent = true
+            let length = dataTask.response?.expectedContentLength ?? -1
+            let type = mimeType(for: relay.target, from: dataTask.response?.mimeType, body: data)
+            beginStream(relay.connection, contentType: type, contentLength: length)
+        }
+        relay.buffer.append(data)
+        relay.connection.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let relay = relay(for: task.taskIdentifier) else { return }
+        setRelay(nil, for: task.taskIdentifier)
+
+        if error != nil {
+            if relay.headerSent {
+                relay.connection.cancel()
+            } else {
+                respond(relay.connection, status: 502, body: Data())
+            }
+            return
+        }
+
+        if relay.isPlaylist {
+            let raw = relay.buffer
+            store(relay.target.absoluteString, raw)
+            let text = String(decoding: raw, as: UTF8.self)
+            let rewritten = rewritePlaylist(text, base: relay.target, referer: refererFor(relay))
+            respond(relay.connection,
+                    status: 200,
+                    contentType: "application/vnd.apple.mpegurl",
+                    body: Data(rewritten.utf8))
+            prefetch(localPlaylist: rewritten, referer: refererFor(relay))
+        } else {
+            store(relay.target.absoluteString, relay.buffer)
+            if !relay.headerSent {
+                // 没有数据（空分片）也要给个完整响应，避免播放器一直等
+                respond(relay.connection,
+                        status: 200,
+                        contentType: mimeType(for: relay.target, from: nil, body: relay.buffer),
+                        body: relay.buffer)
+            } else {
+                relay.connection.cancel()
+            }
+        }
+    }
+
+    private func refererFor(_ relay: Relay) -> String {
+        let host = relay.target.host ?? ""
+        if host.contains("123av") { return "https://123av.com/" }
+        return "https://sadie-shop.site/"
     }
 }

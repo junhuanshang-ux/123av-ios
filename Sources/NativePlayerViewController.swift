@@ -486,7 +486,7 @@ final class NativePlayerViewController: UIViewController {
             self.beginProxy()
         }
         directWatchdog = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: task)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: task)
     }
 
     /// 方案 B：本地 HTTP 代理（稳，代价是多一跳）
@@ -524,7 +524,7 @@ final class NativePlayerViewController: UIViewController {
         statusLabel.text = "初始化解码…"
 
         let item = AVPlayerItem(asset: asset)
-        item.preferredForwardBufferDuration = 4
+        item.preferredForwardBufferDuration = 6
 
         let player = AVPlayer(playerItem: item)
         self.player = player
@@ -536,7 +536,7 @@ final class NativePlayerViewController: UIViewController {
         videoView.layer.addSublayer(layer)
         self.playerLayer = layer
 
-        startWatchdog(seconds: usingLocalProxy ? 10 : 4)
+        startWatchdog(seconds: usingLocalProxy ? 10 : 3)
 
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
