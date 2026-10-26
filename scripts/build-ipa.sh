@@ -92,12 +92,6 @@ with open(out_path, 'wb') as f:
 print('    keys:', ', '.join(sorted(k for k in info if k.startswith('CFBundle'))))
 PY
 
-echo "==> 拷入前端资源 www/"
-rm -rf "$APP_DIR/www"
-mkdir -p "$APP_DIR/www"
-cp -R "$WWW_DIR"/. "$APP_DIR/www/"
-find "$APP_DIR/www" -name '.DS_Store' -delete 2>/dev/null || true
-
 echo "==> Ad-hoc 签名（侧载工具会重新签名）"
 codesign --force --sign - --timestamp=none "$APP_DIR" 2>/dev/null || echo "    （跳过 ad-hoc 签名）"
 

@@ -65,8 +65,6 @@ jobs:
           test -d "$APP_DIR"
           rm -rf out && mkdir -p out/Payload
           cp -R "$APP_DIR" out/Payload/
-          # 前端资源随包携带（WKWebView 直接读 Bundle 里的 www/）
-          cp -R www out/Payload/123AV.app/www
           # 顺带做一次 ad-hoc 签名，侧载工具重签时更省事
           codesign --force --sign - --timestamp=none out/Payload/123AV.app || true
           ( cd out && zip -qry ../123AV-unsigned.ipa Payload )
