@@ -39,15 +39,10 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: 安装 XcodeGen（预编译包，比 brew 快约 1 分钟）
+      - name: 安装 XcodeGen
         run: |
-          if ! command -v xcodegen >/dev/null; then
-            (
-              curl -fsSL -o /tmp/xcodegen.zip \
-                https://github.com/yonaskolb/XcodeGen/releases/download/2.44.1/xcodegen.zip \
-              && unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen \
-              && sudo cp -R /tmp/xcodegen/xcodegen/* /usr/local/bin/ \
-            ) || brew install xcodegen
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen || brew install xcodegen
           fi
           xcodegen --version
 
