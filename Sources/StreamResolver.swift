@@ -5,7 +5,7 @@ import Foundation
 /// embed 页（https://sadie-shop.site/e/{id}?poster=…）里的 JS 会请求：
 ///   GET {origin}/stream?{embed 的所有 query}&id={id}
 ///   → {"status":"ok","media":{"stream":"https://…/video.m3u8","vtt":"…"}}
-/// 拿到 m3u8 后由 HLSLocalProxy 补齐 Referer 再交给 AVPlayer。
+/// 拿到 m3u8 后交给 LocalHLSProxy（本地 HTTP 代理，负责补 Referer 与改写播放列表）再喂给 AVPlayer。
 enum StreamResolver {
 
     static let userAgent =

@@ -28,7 +28,8 @@ final class NativePlayerViewController: UIViewController {
 
     private var player: AVPlayer?
     private var playerLayer: AVPlayerLayer?
-    private var proxy: HLSLocalProxy?
+    private var streamURL: URL?
+    private var lastFailure: String?
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var pip: AVPictureInPictureController?
@@ -424,58 +425,90 @@ final class NativePlayerViewController: UIViewController {
         StreamResolver.resolve(embedURL: embedURL) { [weak self] result in
             guard let self = self else { return }
             switch result {
-            case .success(let streamURL):
-                self.attach(streamURL: streamURL)
+            case .success(let url):
+                self.streamURL = url
+                self.prepareLocalPlayback()
             case .failure(let error):
                 self.fallback(reason: error.localizedDescription)
             }
         }
     }
 
-    private func attach(streamURL: URL) {
-        statusLabel.text = "校验播放源…"
-        precheck(streamURL) { [weak self] ok in
-            guard let self = self else { return }
-            if ok {
-                self.attachVerified(streamURL: streamURL)
-            } else {
-                self.fallback(reason: "播放源不可用（403 或被拦截）")
-            }
+    /// 启动本地代理 → 用「代理地址」做端到端预检（播放列表 + 第一个分片都能取到）→ 交给 AVPlayer
+    private func prepareLocalPlayback() {
+        guard let streamURL = streamURL else {
+            fallback(reason: "播放源为空")
+            return
         }
-    }
+        statusLabel.text = "启动本地代理…"
 
-    /// 先用普通 URLSession 带 Referer 拉一次 master m3u8，确认链路通再交给 AVPlayer
-    private func precheck(_ streamURL: URL, completion: @escaping (Bool) -> Void) {
-        var request = URLRequest(url: streamURL)
-        request.timeoutInterval = 12
-        request.setValue("https://\(embedURL.host ?? "")/", forHTTPHeaderField: "Referer")
-        request.setValue(StreamResolver.userAgent, forHTTPHeaderField: "User-Agent")
-
-        URLSession.shared.dataTask(with: request) { data, response, _ in
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            var head = ""
-            if let data = data, data.count >= 7 {
-                head = String(decoding: data.prefix(7), as: UTF8.self)
-            }
-            let ok = status == 200 && head == "#EXTM3U"
-            DispatchQueue.main.async { completion(ok) }
-        }.resume()
-    }
-
-    private func attachVerified(streamURL: URL) {
-        guard let proxyURL = HLSLocalProxy.proxyURL(for: streamURL) else {
-            fallback(reason: "地址不支持")
+        LocalHLSProxy.shared.startIfNeeded()
+        let referer = "https://\(embedURL.host ?? "")/"
+        guard let localPlaylist = LocalHLSProxy.shared.localURL(for: streamURL, referer: referer) else {
+            lastFailure = "本地代理启动失败"
+            fallback(reason: lastFailure ?? "本地代理启动失败")
             return
         }
 
-        let host = embedURL.host ?? ""
-        let proxy = HLSLocalProxy(referer: "https://\(host)/")
-        self.proxy = proxy
+        statusLabel.text = "校验播放源…"
+        fetchText(localPlaylist) { [weak self] playlist in
+            guard let self = self else { return }
+            guard let playlist = playlist, playlist.hasPrefix("#EXTM3U") else {
+                self.lastFailure = "播放列表取不到"
+                self.fallback(reason: "播放列表取不到（403 或被拦截）")
+                return
+            }
 
-        let asset = AVURLAsset(url: proxyURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
-        asset.resourceLoader.setDelegate(proxy, queue: DispatchQueue(label: "avstream.proxy"))
+            // 再验证第一个分片，确认整条链路通
+            let firstSegment = playlist
+                .components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .first { !$0.isEmpty && !$0.hasPrefix("#") }
 
+            guard let segmentLine = firstSegment else {
+                self.lastFailure = "播放列表里没有分片"
+                self.fallback(reason: "播放列表里没有分片")
+                return
+            }
+
+            self.statusLabel.text = "校验分片…"
+            let segmentURL = URL(string: segmentLine)
+                ?? URL(string: segmentLine, relativeTo: localPlaylist)?.absoluteURL
+
+            guard let segmentURL = segmentURL else {
+                self.lastFailure = "分片地址无效"
+                self.fallback(reason: "分片地址无效")
+                return
+            }
+
+            self.fetchText(segmentURL) { [weak self] body in
+                guard let self = self else { return }
+                guard let body = body, !body.isEmpty else {
+                    self.fallback(reason: "分片取不到（被拦截）")
+                    return
+                }
+                self.attachPlayer(localURL: localPlaylist)
+            }
+        }
+    }
+
+    /// 用普通请求（带 Referer）取文本，用于预检
+    private func fetchText(_ url: URL, completion: @escaping (String?) -> Void) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let text = (status == 200 && data != nil)
+                ? String(decoding: data!, as: UTF8.self)
+                : nil
+            DispatchQueue.main.async { completion(text) }
+        }.resume()
+    }
+
+    private func attachPlayer(localURL: URL) {
         statusLabel.text = "初始化解码…"
+
+        let asset = AVURLAsset(url: localURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 12
 
@@ -499,16 +532,15 @@ final class NativePlayerViewController: UIViewController {
                     self.cancelWatchdog()
                     self.spinner.stopAnimating()
                     self.statusLabel.text = ""
-                    let d = item.duration.seconds
-                    if d.isFinite && d > 0 {
-                        self.duration = d
-                        self.durationLabel.text = self.timeText(d)
+                    let duration = item.duration.seconds
+                    if duration.isFinite && duration > 0 {
+                        self.duration = duration
+                        self.durationLabel.text = self.timeText(duration)
                     }
                     player.play()
                     self.updatePlayButton()
                 case .failed:
-                    let detail = self.proxy?.lastErrorText
-                    self.fallback(reason: detail ?? item.error?.localizedDescription ?? "播放失败")
+                    self.fallback(reason: item.error?.localizedDescription ?? "解码失败")
                 default:
                     break
                 }
@@ -540,8 +572,7 @@ final class NativePlayerViewController: UIViewController {
         let task = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             guard self.player?.currentItem?.status != .readyToPlay else { return }
-            let detail = self.proxy?.lastErrorText ?? "10 秒内未就绪"
-            self.fallback(reason: detail)
+            self.fallback(reason: self.lastFailure ?? "10 秒内仍未就绪")
         }
         watchdog = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: task)

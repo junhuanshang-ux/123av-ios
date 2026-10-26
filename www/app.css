@@ -104,9 +104,10 @@ svg { display: block; }
 
 /* ---------- 卡片 ---------- */
 .grid {
-  display: grid; gap: 12px 10px;
+  display: grid; gap: 14px 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 0 12px;
+  align-items: start;
 }
 .rail {
   display: flex; gap: 10px; overflow-x: auto; padding: 0 14px 4px;
@@ -121,9 +122,8 @@ svg { display: block; }
   position: relative; display: block; border-radius: 10px; overflow: hidden;
   background: var(--card-2);
 }
-/* 3:4 固定比例（padding 兜底，兼容 iOS 14 的 Safari） */
-.card__cover::before { content: ""; display: block; padding-top: 133.333%; }
-.card__cover img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; }
+/* 封面比例混合（3:2 / 16:9 / 个别竖版），按原图比例显示，不裁剪 */
+.card__cover img { width: 100%; height: auto; display: block; }
 .card__cover::after {
   content: ""; position: absolute; inset: 0;
   background: linear-gradient(to top, var(--cover-shade), rgba(0,0,0,0) 42%);
@@ -144,6 +144,16 @@ svg { display: block; }
   color: var(--text);
 }
 .card__sub { margin-top: 3px; font-size: 11px; color: var(--muted); display: flex; gap: 6px; }
+.card__rank {
+  position: absolute; left: 6px; top: 6px; z-index: 2;
+  min-width: 20px; height: 20px; padding: 0 5px; border-radius: 6px;
+  background: rgba(0, 0, 0, .62); color: #fff;
+  font-size: 11px; font-weight: 700; letter-spacing: .02em;
+  display: flex; align-items: center; justify-content: center;
+}
+.card__rank.is-top { background: var(--accent); }
+.ghost-btn { font-size: 13px; color: var(--accent); font-weight: 600; display: flex; align-items: center; gap: 3px; }
+.ghost-btn:active { opacity: .6; }
 .card:active .card__cover { transform: scale(.985); }
 
 /* ---------- 分类 ---------- */
@@ -230,7 +240,7 @@ svg { display: block; }
 .skeleton { border-radius: 10px; background: linear-gradient(100deg, var(--sk-1) 30%, var(--sk-2) 50%, var(--sk-1) 70%); background-size: 220% 100%; animation: sk 1.2s infinite linear; }
 @keyframes sk { from { background-position: 180% 0; } to { background-position: -20% 0; } }
 .sk-card { display: grid; gap: 8px; }
-.sk-card .skeleton:first-child { position: relative; padding-top: 133.333%; }
+.sk-card .skeleton:first-child { position: relative; padding-top: 66.666%; }
 .sk-card .skeleton:last-child { height: 13px; }
 
 .empty { padding: 56px 24px; text-align: center; color: var(--muted); font-size: 14px; }

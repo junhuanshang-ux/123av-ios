@@ -391,11 +391,16 @@ function loadGenres() {
 }
 
 /* ------------------------------ 渲染：卡片 ------------------------------ */
-function cardHtml(it) {
+function cardHtml(it, opts) {
+  opts = opts || {};
+  var rank = opts.rank
+    ? '<span class="card__rank' + (opts.rank <= 3 ? ' is-top' : '') + '">' + opts.rank + '</span>'
+    : '';
   return '' +
     '<div class="card" data-code="' + esc(it.code) + '">' +
       '<a class="card__cover" href="#/v/' + encodeURIComponent(it.code) + '">' +
         '<img loading="lazy" src="' + esc(it.cover) + '" alt="">' +
+        rank +
         (it.duration ? '<span class="card__dur">' + esc(it.duration) + '</span>' : '') +
       '</a>' +
       '<div class="card__title">' + esc(it.title) + '</div>' +
@@ -417,12 +422,44 @@ function emptyHtml(title, sub) {
   return '<div class="empty"><b>' + esc(title) + '</b>' + esc(sub || '') + '</div>';
 }
 
-function sectionHtml(title, inner, moreHref, moreText) {
+function sectionHtml(title, inner, moreHref, moreText, rightHtml) {
+  var right = rightHtml || (moreHref
+    ? '<a class="section-more" href="' + moreHref + '">' + esc(moreText || '更多 ›') + '</a>'
+    : '');
   return '<section class="section">' +
-    '<div class="section-head"><h2 class="section-title">' + esc(title) + '</h2>' +
-    (moreHref ? '<a class="section-more" href="' + moreHref + '">' + esc(moreText || '更多 ›') + '</a>' : '') +
-    '</div>' + inner + '</section>';
+    '<div class="section-head"><h2 class="section-title">' + esc(title) + '</h2>' + right + '</div>' +
+    inner + '</section>';
 }
+
+/* ------------------------------ 最近观看（本地记录） ------------------------------ */
+var WatchLog = {
+  KEY: 'recent_watch',
+  MAX: 20,
+
+  all: function () {
+    try {
+      var raw = JSON.parse(localStorage.getItem(WatchLog.KEY) || '[]');
+      return Array.isArray(raw) ? raw.filter(function (x) { return x && x.code; }) : [];
+    } catch (e) { return []; }
+  },
+
+  add: function (item) {
+    if (!item || !item.code) return;
+    var list = WatchLog.all().filter(function (x) { return x.code !== item.code; });
+    list.unshift({
+      code: String(item.code).toLowerCase(),
+      title: item.title || item.code,
+      cover: item.cover || '',
+      duration: item.duration || '',
+      at: Date.now()
+    });
+    try { localStorage.setItem(WatchLog.KEY, JSON.stringify(list.slice(0, WatchLog.MAX))); } catch (e) {}
+  },
+
+  clear: function () {
+    try { localStorage.removeItem(WatchLog.KEY); } catch (e) {}
+  }
+};
 
 /* ------------------------------ 视图：推荐 ------------------------------ */
 var homeCache = null;
@@ -431,8 +468,9 @@ var homeCacheAt = 0;
 function renderHome(root) {
   document.getElementById('tbTitle').textContent = '推荐';
 
-  if (homeCache && Date.now() - homeCacheAt < 5 * 60 * 1000) {
+  if (homeCache && Date.now() - homeCacheAt < 3 * 60 * 1000) {
     root.innerHTML = homeCache;
+    bindHome(root);
     return;
   }
 
@@ -440,18 +478,19 @@ function renderHome(root) {
 
   var uid = userId();
   var batchReq = [
-    { url: 'users/' + uid + '/items', data: { count: 12, scenario: 'home-recommended', included_properties: props } }
+    { url: 'users/' + uid + '/items', data: { count: 18, scenario: 'home-recommended', included_properties: props } }
   ];
 
   Promise.all([
     Api.segments().catch(function () { return []; }),
-    netFetch(CFG.SITE + '/cn/new').then(function (r) { return parseCards(r.text).slice(0, 12); }).catch(function () { return []; }),
-    loadGenres().catch(function () { return []; })          // 为了把中文段落名映射回分类 slug
+    netFetch(CFG.SITE + '/cn/new').then(function (r) { return parseCards(r.text).slice(0, 18); }).catch(function () { return []; }),
+    netFetch(CFG.SITE + '/cn/all?sort=today').then(function (r) { return parseCards(r.text).slice(0, 15); }).catch(function () { return []; }),
+    loadGenres().catch(function () { return []; })
   ]).then(function (res) {
-    var segs = res[0], fresh = res[1];
+    var segs = res[0], fresh = res[1], today = res[2], genres = res[3] || [];
     var labels = {};
 
-    var jobs = segs.map(function (g) {
+    segs.forEach(function (g) {
       batchReq.push({ url: 'users/' + uid + '/items', data: { count: 12, scenario: 'home-segments-items', genre: g, included_properties: props } });
     });
 
@@ -462,20 +501,58 @@ function renderHome(root) {
       var rec = arr[0] || [];
       var html = '';
 
+      // 1. 为你推荐（可换一批）
       if (rec.length) {
-        html += sectionHtml('为你推荐', gridHtml(rec));
+        html += sectionHtml(
+          '为你推荐',
+          '<div class="grid" id="recGrid">' + rec.map(function (x) { return cardHtml(x); }).join('') + '</div>',
+          null, null,
+          '<button class="ghost-btn" id="recShuffle">换一批 ↻</button>'
+        );
       }
 
+      // 2. 最近观看（有记录才出现）
+      var recent = WatchLog.all();
+      if (recent.length) {
+        html += sectionHtml(
+          '最近观看',
+          '<div class="rail">' + recent.map(function (x) { return cardHtml(x); }).join('') + '</div>',
+          null, null,
+          '<button class="ghost-btn" id="recentClear">清空</button>'
+        );
+      }
+
+      // 3. 今日热门（带排名）
+      if (today.length) {
+        html += sectionHtml(
+          '今日热门',
+          '<div class="rail">' + today.map(function (x, i) { return cardHtml(x, { rank: i + 1 }); }).join('') + '</div>',
+          '#/l/hot', '更多 ›'
+        );
+      }
+
+      // 4. 按口味的分段推荐
       for (var i = 0; i < segs.length; i++) {
         var items = arr[i + 1] || [];
         if (!items.length) continue;
         var name = labels[segs[i]] || segs[i];
-        html += sectionHtml(name, '<div class="rail">' + items.map(cardHtml).join('') + '</div>',
+        html += sectionHtml(name, '<div class="rail">' + items.map(function (x) { return cardHtml(x); }).join('') + '</div>',
           '#/g/' + encodeURIComponent(slugFromLabel(name, segs[i])), '全部 ›');
       }
 
+      // 5. 新发布
       if (fresh.length) {
-        html += sectionHtml('新发布', '<div class="rail">' + fresh.map(cardHtml).join('') + '</div>', '#/l/new', '更多 ›');
+        html += sectionHtml('新发布', '<div class="rail">' + fresh.map(function (x) { return cardHtml(x); }).join('') + '</div>',
+          '#/l/new', '更多 ›');
+      }
+
+      // 6. 分类速览
+      if (genres.length) {
+        html += sectionHtml('分类速览',
+          '<div class="chips">' + genres.slice(0, 12).map(function (g) {
+            return '<a class="chip" href="#/g/' + encodeURIComponent(g.slug) + '">' + esc(g.name) + '</a>';
+          }).join('') + '</div>',
+          '#/cats', '全部 ›');
       }
 
       if (!html) html = emptyHtml('暂时没有内容', '请检查网络后下拉刷新');
@@ -483,13 +560,47 @@ function renderHome(root) {
       homeCache = html;
       homeCacheAt = Date.now();
       root.innerHTML = html;
+      bindHome(root);
     });
   }).catch(function (e) {
     root.innerHTML = emptyHtml('加载失败', (e && e.message) || '请稍后重试') +
       '<div style="text-align:center;padding:0 24px 24px"><button class="btn" id="retry">重新加载</button></div>';
     var b = document.getElementById('retry');
-    if (b) b.onclick = function () { renderHome(root); };
+    if (b) b.onclick = function () { homeCache = null; renderHome(root); };
   });
+}
+
+/// 首页交互：换一批 / 清空最近观看
+function bindHome(root) {
+  var shuffle = root.querySelector('#recShuffle');
+  if (shuffle) {
+    shuffle.onclick = function () {
+      if (shuffle.getAttribute('data-busy')) return;
+      shuffle.setAttribute('data-busy', '1');
+      shuffle.textContent = '换一批 …';
+      Api.items({ count: 18 }).then(function (items) {
+        var grid = root.querySelector('#recGrid');
+        if (grid && items.length) {
+          grid.innerHTML = items.map(function (x) { return cardHtml(x); }).join('');
+          homeCache = root.innerHTML;
+        }
+      }).catch(function () {
+        toast('换一批失败');
+      }).then(function () {
+        shuffle.removeAttribute('data-busy');
+        shuffle.textContent = '换一批 ↻';
+      });
+    };
+  }
+
+  var clear = root.querySelector('#recentClear');
+  if (clear) {
+    clear.onclick = function () {
+      WatchLog.clear();
+      homeCache = null;
+      renderHome(root);
+    };
+  }
 }
 
 // 用中文标签尽力映射到分类 slug（首页 rail 的“全部”入口）
@@ -749,6 +860,13 @@ function renderDetail(root, code) {
     function play(idx) {
       var ep = d.episodes[idx || 0];
       if (!ep || !ep.url) { toast('暂无播放源'); return; }
+      WatchLog.add({
+        code: code,
+        title: d.title || d.code,
+        cover: poster || coverUrl(code),
+        duration: (d.info && d.info['时长']) || ''
+      });
+      homeCache = null;
       openPlayer(ep.url, d.title || d.code, d.code);
     }
 
