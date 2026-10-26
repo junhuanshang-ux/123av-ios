@@ -182,7 +182,8 @@ extension GridViewController: UICollectionViewDelegateFlowLayout {
     func collectionView(_ collectionView: UICollectionView,
                         layout collectionViewLayout: UICollectionViewLayout,
                         sizeForItemAt indexPath: IndexPath) -> CGSize {
-        let width = (collectionView.bounds.width - 24 - 10) / 2
+        let available = collectionView.bounds.width
+        let width = max((available - 24 - 10) / 2, 60)
         return CGSize(width: width, height: width * 2 / 3 + 46)
     }
 

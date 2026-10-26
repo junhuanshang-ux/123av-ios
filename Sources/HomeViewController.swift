@@ -117,7 +117,7 @@ final class HomeViewController: UIViewController {
             case .grid:
                 let inset: CGFloat = 12
                 let spacing: CGFloat = 10
-                let itemWidth = (width - inset * 2 - spacing) / 2
+                let itemWidth = max((width - inset * 2 - spacing) / 2, 60)
                 let itemHeight = itemWidth * 2 / 3 + 46
                 let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .absolute(itemWidth),
                                                                    heightDimension: .absolute(itemHeight)))

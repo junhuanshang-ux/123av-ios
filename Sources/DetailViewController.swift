@@ -123,8 +123,9 @@ final class DetailViewController: UIViewController {
             playOverlay.centerYAnchor.constraint(equalTo: heroContainer.centerYAnchor)
         ])
 
-        heroContainer.heightAnchor.constraint(equalTo: view.widthAnchor, multiplier: 9.0 / 16.0).isActive = true
+        // 必须先入层级再激活跨层级约束，否则 UIKit 抛 "no common ancestor" 直接闪退
         contentStack.addArrangedSubview(heroContainer)
+        heroContainer.heightAnchor.constraint(equalTo: view.widthAnchor, multiplier: 9.0 / 16.0).isActive = true
     }
 
     private func buildHeadline() {
