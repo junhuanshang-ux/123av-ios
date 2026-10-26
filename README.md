@@ -1,4 +1,8 @@
-# 123AV · iOS 客户端（App 名「邮件」，含站点接口逆向分析）
+# 123AV · iOS 客户端（App 名「邮件」，**全原生 UIKit**）
+
+> **v2 已改为全原生**：不再用 WKWebView 承载界面。TabBar / 首页 / 分类 / 搜索 / 详情 全是 UIKit，
+> 播放器是 AVPlayer（直连优先 + 本地 HLS 代理兜底）。网页层只保留一个失败兜底播放器。
+> 数据来源：推荐接口（rec2 JSON）优先，列表/详情/搜索仍取站点 HTML 并在 Swift 内解析。
 
 把 `https://123av.com/cn` 做成一个能装进 iPhone 的 App，**桌面显示为「邮件」+ 邮件图标**，
 进入应用与进入播放器都要**面容 ID / 锁屏密码**验证。仓库里同时包含**接口分析**与**客户端源码**。
@@ -176,11 +180,17 @@ AVPlayer ← avstream:// 本地代理（HLSLocalProxy 补 Referer，CDN 才肯�
 │  ├─ app.css               深色主题
 │  ├─ app.js                路由 / 视图 / 解析 / 接口
 │  └─ md5.js                封面 CDN 需要的 MD5（已与 Node crypto 对拍）
-├─ Sources/                 原生（8 个文件，无第三方依赖）
+├─ Sources/                 原生（16 个文件，无第三方依赖）
+│  ├─ Core.swift                     配置 / 模型 / 主题 / MD5 / 本地记录
+│  ├─ Networking.swift               rec2 签名接口 + 站点 JSON + HTML 解析
+│  ├─ Views.swift                    卡片/头视图/芯片/图片缓存
+│  ├─ HomeViewController.swift       推荐页（换一批/最近观看/今日热门/分段/新发布/分类速览）
+│  ├─ CategoryViewController.swift    分类（快捷入口 + 499 分类筛选）
+│  ├─ GridViewController.swift       通用分页网格（分类/列表/搜索）
+│  ├─ DetailViewController.swift     详情（信息表/剧集/类别/相似推荐）
+│  ├─ MainTabBarController.swift     三个 Tab + 隐私遮罩 + 启动验证
 │  ├─ AppDelegate.swift
 │  ├─ SceneDelegate.swift
-│  ├─ WebAppViewController.swift      WKWebView 容器 + 导航策略 + 验证闸门 + 隐私遮罩
-│  ├─ NetBridge.swift                 JS ⇄ URLSession 网络桥
 │  ├─ AuthGate.swift                 面容 / 锁屏密码验证（含 60 秒宽限）
 │  ├─ LockViewController.swift        全屏验证页
 │  ├─ StreamResolver.swift            embed → /stream → m3u8
