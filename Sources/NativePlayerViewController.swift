@@ -57,6 +57,8 @@ final class NativePlayerViewController: UIViewController {
     private let durationLabel = UILabel()
     private let speedButton = UIButton(type: .system)
     private let switchButton = UIButton(type: .system)
+    private let aspectButton = UIButton(type: .system)
+    private let aspectKey = "player.gravity"
     private var watchdog: DispatchWorkItem?
     private let pipButton = UIButton(type: .system)
     private let rotateButton = UIButton(type: .system)
@@ -157,10 +159,13 @@ final class NativePlayerViewController: UIViewController {
         styleTextButton(speedButton, title: "1.0x")
         speedButton.addTarget(self, action: #selector(showSpeedMenu), for: .touchUpInside)
 
+        styleIconButton(aspectButton, systemName: "aspectratio")
+        aspectButton.addTarget(self, action: #selector(cycleAspect), for: .touchUpInside)
+
         styleIconButton(switchButton, systemName: "arrow.triangle.2.circlepath")
         switchButton.addTarget(self, action: #selector(switchPlayer), for: .touchUpInside)
 
-        let topStack = UIStackView(arrangedSubviews: [closeButton, titleLabel, switchButton, speedButton])
+        let topStack = UIStackView(arrangedSubviews: [closeButton, titleLabel, aspectButton, switchButton, speedButton])
         topStack.axis = .horizontal
         topStack.spacing = 10
         topStack.alignment = .center
@@ -535,6 +540,7 @@ final class NativePlayerViewController: UIViewController {
         layer.backgroundColor = UIColor.black.cgColor
         videoView.layer.addSublayer(layer)
         self.playerLayer = layer
+        applyAspect()
 
         startWatchdog(seconds: usingLocalProxy ? 10 : 3)
 
@@ -608,6 +614,36 @@ final class NativePlayerViewController: UIViewController {
     private func cancelWatchdog() {
         watchdog?.cancel()
         watchdog = nil
+    }
+
+    // MARK: - 画面比例
+
+    private let aspectModes: [(name: String, gravity: AVLayerVideoGravity)] = [
+        ("原始比例", .resizeAspect),
+        ("铺满屏幕", .resizeAspectFill),
+        ("拉伸填满", .resize)
+    ]
+
+    private var aspectIndex: Int {
+        get { min(max(UserDefaults.standard.integer(forKey: aspectKey), 0), 2) }
+        set { UserDefaults.standard.set(min(max(newValue, 0), 2), forKey: aspectKey) }
+    }
+
+    private func applyAspect(silent: Bool = true) {
+        let mode = aspectModes[aspectIndex]
+        playerLayer?.videoGravity = mode.gravity
+        if !silent {
+            hud.show(symbol: "aspectratio", text: mode.name)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.hud.hide()
+            }
+        }
+    }
+
+    @objc private func cycleAspect() {
+        aspectIndex = (aspectIndex + 1) % aspectModes.count
+        applyAspect(silent: false)
+        setControlsVisible(true)
     }
 
     @objc private func switchPlayer() {

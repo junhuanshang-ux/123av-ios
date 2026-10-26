@@ -25,7 +25,7 @@ final class LocalHLSProxy: NSObject {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 60
-        config.httpMaximumConnectionsPerHost = 8
+        config.httpMaximumConnectionsPerHost = 12
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.httpShouldUsePipelining = true
         return config
@@ -64,10 +64,15 @@ final class LocalHLSProxy: NSObject {
     // MARK: - 缓存
 
     private let cacheLock = NSLock()
+
+    // 分片索引：用于边播边往后预取
+    private let indexLock = NSLock()
+    private var playlistSegments: [String: [String]] = [:]
+    private var segmentOwner: [String: (playlist: String, index: Int)] = [:]
     private var cache: [String: Data] = [:]
     private var cacheOrder: [String] = []
     private var cacheBytes = 0
-    private let cacheLimit = 32 * 1024 * 1024
+    private let cacheLimit = 48 * 1024 * 1024
 
     private func cached(_ key: String) -> Data? {
         cacheLock.lock()
@@ -234,14 +239,17 @@ final class LocalHLSProxy: NSObject {
         // 缓存命中：直接整段返回（最快路径）
         if let hit = cached(target.absoluteString) {
             if hit.starts(with: Data("#EXTM3U".utf8)) {
-                let rewritten = rewritePlaylist(String(decoding: hit, as: UTF8.self), base: target, referer: referer)
+                let result = rewritePlaylist(String(decoding: hit, as: UTF8.self), base: target, referer: referer)
+                register(playlistKey: target.absoluteString, segments: result.segments)
                 respond(connection, status: 200,
                         contentType: "application/vnd.apple.mpegurl",
-                        body: Data(rewritten.utf8))
+                        body: Data(result.body.utf8))
+                prefetchRange(playlistKey: target.absoluteString, from: 0, count: 8, referer: referer)
             } else {
                 respond(connection, status: 200,
                         contentType: mimeType(for: target, from: nil, body: hit),
                         body: hit)
+                prefetchAhead(of: target, referer: referer)
             }
             return
         }
@@ -315,8 +323,9 @@ final class LocalHLSProxy: NSObject {
 
     // MARK: - 播放列表改写
 
-    private func rewritePlaylist(_ text: String, base: URL, referer: String) -> String {
+    private func rewritePlaylist(_ text: String, base: URL, referer: String) -> (body: String, segments: [String]) {
         var output: [String] = []
+        var segments: [String] = []
         for rawLine in text.components(separatedBy: "\n") {
             let line = rawLine.hasSuffix("\r") ? String(rawLine.dropLast()) : rawLine
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -328,11 +337,12 @@ final class LocalHLSProxy: NSObject {
             } else if let resolved = URL(string: trimmed, relativeTo: base)?.absoluteURL,
                       let local = localURL(for: resolved, referer: referer) {
                 output.append(local.absoluteString)
+                segments.append(resolved.absoluteString)
             } else {
                 output.append(line)
             }
         }
-        return output.joined(separator: "\n")
+        return (output.joined(separator: "\n"), segments)
     }
 
     private func rewriteURIAttributes(in line: String, base: URL, referer: String) -> String {
@@ -362,35 +372,54 @@ final class LocalHLSProxy: NSObject {
 
     // MARK: - 预取
 
-    /// 播放列表返回后，把前若干段并发拉进缓存，AVPlayer 请求时直接命中
-    private func prefetch(localPlaylist: String, referer: String, count: Int = 6) {
-        var targets: [URL] = []
-        for line in localPlaylist.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            guard let components = URLComponents(string: trimmed),
-                  let encoded = components.queryItems?.first(where: { $0.name == "u" })?.value,
-                  let targetString = LocalHLSProxy.decode(encoded),
-                  let target = URL(string: targetString) else { continue }
-            targets.append(target)
-            if targets.count >= count { break }
+    /// 记录某播放列表的分片顺序
+    private func register(playlistKey: String, segments: [String]) {
+        guard !segments.isEmpty else { return }
+        indexLock.lock()
+        playlistSegments[playlistKey] = segments
+        for (index, segment) in segments.enumerated() {
+            segmentOwner[segment] = (playlistKey, index)
         }
+        indexLock.unlock()
+    }
 
-        for target in targets {
-            if cached(target.absoluteString) != nil { continue }
-            var request = URLRequest(url: target)
-            request.setValue(referer, forHTTPHeaderField: "Referer")
-            request.setValue(StreamResolver.userAgent, forHTTPHeaderField: "User-Agent")
+    private func prefetchOne(_ targetString: String, referer: String) {
+        guard cached(targetString) == nil, let url = URL(string: targetString) else { return }
+        var request = URLRequest(url: url)
+        request.setValue(referer, forHTTPHeaderField: "Referer")
+        request.setValue(StreamResolver.userAgent, forHTTPHeaderField: "User-Agent")
+        session.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self = self, let data = data, !data.isEmpty else { return }
+            self.store(targetString, data)
+        }.resume()
+    }
 
-            session.dataTask(with: request) { [weak self] data, _, _ in
-                guard let self = self, let data = data, !data.isEmpty else { return }
-                self.store(target.absoluteString, data)
-            }.resume()
+    /// 并发预取某播放列表的一段
+    private func prefetchRange(playlistKey: String, from start: Int, count: Int, referer: String) {
+        indexLock.lock()
+        let list = playlistSegments[playlistKey] ?? []
+        indexLock.unlock()
+        guard !list.isEmpty else { return }
+        let begin = max(start, 0)
+        let end = min(begin + count, list.count)
+        guard begin < end else { return }
+        for index in begin..<end {
+            prefetchOne(list[index], referer: referer)
         }
+    }
+
+    /// 播放到某段时，往后预取若干段（边播边缓存，拖动/连播不再等）
+    private func prefetchAhead(of target: URL, referer: String, count: Int = 8) {
+        let key = target.absoluteString
+        indexLock.lock()
+        let owner = segmentOwner[key]
+        indexLock.unlock()
+        guard let owner = owner else { return }
+        prefetchRange(playlistKey: owner.playlist, from: owner.index + 1, count: count, referer: referer)
     }
 }
 
-// MARK: - 上游数据流
+
 
 extension LocalHLSProxy: URLSessionDataDelegate {
 
@@ -442,14 +471,18 @@ extension LocalHLSProxy: URLSessionDataDelegate {
             let raw = relay.buffer
             store(relay.target.absoluteString, raw)
             let text = String(decoding: raw, as: UTF8.self)
-            let rewritten = rewritePlaylist(text, base: relay.target, referer: refererFor(relay))
+            let referer = refererFor(relay)
+            let result = rewritePlaylist(text, base: relay.target, referer: referer)
+            register(playlistKey: relay.target.absoluteString, segments: result.segments)
             respond(relay.connection,
                     status: 200,
                     contentType: "application/vnd.apple.mpegurl",
-                    body: Data(rewritten.utf8))
-            prefetch(localPlaylist: rewritten, referer: refererFor(relay))
+                    body: Data(result.body.utf8))
+            // 首屏直接把前 8 段拉进缓存
+            prefetchRange(playlistKey: relay.target.absoluteString, from: 0, count: 8, referer: referer)
         } else {
             store(relay.target.absoluteString, relay.buffer)
+            prefetchAhead(of: relay.target, referer: refererFor(relay))
             if !relay.headerSent {
                 // 没有数据（空分片）也要给个完整响应，避免播放器一直等
                 respond(relay.connection,
