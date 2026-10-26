@@ -46,12 +46,12 @@ final class HomeViewController: UIViewController {
         navigationController?.navigationBar.standardAppearance = appearance
         navigationController?.navigationBar.scrollEdgeAppearance = appearance
 
-        let themeButton = UIBarButtonItem(image: UIImage(systemName: "circle.lefthalf.filled"),
-                                          style: .plain,
-                                          target: self,
-                                          action: #selector(toggleTheme))
-        themeButton.tintColor = Palette.text
-        navigationItem.rightBarButtonItem = themeButton
+        let settingsButton = UIBarButtonItem(image: UIImage(systemName: "gearshape"),
+                                             style: .plain,
+                                             target: self,
+                                             action: #selector(openSettings))
+        settingsButton.tintColor = Palette.text
+        navigationItem.rightBarButtonItem = settingsButton
     }
 
     private func setupCollectionView() {
@@ -381,9 +381,8 @@ final class HomeViewController: UIViewController {
         load()
     }
 
-    @objc private func toggleTheme() {
-        _ = ThemeManager.shared.cycle()
-        collectionView.reloadData()
+    @objc private func openSettings() {
+        navigationController?.pushViewController(SettingsViewController(), animated: true)
     }
 }
 

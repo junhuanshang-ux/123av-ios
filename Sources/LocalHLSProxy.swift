@@ -80,6 +80,27 @@ final class LocalHLSProxy: NSObject {
         return cache[key]
     }
 
+    /// 当前缓存占用（字节）
+    var cachedBytes: Int {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cacheBytes
+    }
+
+    /// 清空全部缓存与分片索引
+    func clearCache() {
+        cacheLock.lock()
+        cache = [:]
+        cacheOrder = []
+        cacheBytes = 0
+        cacheLock.unlock()
+
+        indexLock.lock()
+        playlistSegments = [:]
+        segmentOwner = [:]
+        indexLock.unlock()
+    }
+
     private func store(_ key: String, _ data: Data) {
         guard !data.isEmpty else { return }
         cacheLock.lock()

@@ -26,6 +26,10 @@ final class RemoteImageView: UIImageView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    static func clearCache() {
+        cache.removeAllObjects()
+    }
+
     func set(url: URL?) {
         guard let url = url else {
             task?.cancel()
